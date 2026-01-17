@@ -42,6 +42,7 @@ MODULES= \
 	ssh_agent_SUITE \
 	ssh_dbg_SUITE \
 	ssh_engine_SUITE \
+	ssh_fido_SUITE \
 	ssh_protocol_SUITE \
 	ssh_property_test_SUITE \
 	ssh_pubkey_SUITE \

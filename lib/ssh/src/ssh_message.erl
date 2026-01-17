@@ -61,7 +61,7 @@ ucl(B) ->
 %%%================================================================
 %%%
 %%% Encode/decode messages
-%%% 
+%%%
 
 encode(#ssh_msg_global_request{
 	  name = Name,
@@ -359,7 +359,7 @@ decode(<<?BYTE(?SSH_MSG_CHANNEL_DATA), ?UINT32(Recipient), ?DEC_BIN(Data,__0)>>)
        recipient_channel = Recipient,
        data = Data
     };
-decode(<<?BYTE(?SSH_MSG_CHANNEL_EXTENDED_DATA), ?UINT32(Recipient), 
+decode(<<?BYTE(?SSH_MSG_CHANNEL_EXTENDED_DATA), ?UINT32(Recipient),
 	 ?UINT32(DataType), ?DEC_BIN(Data,__0)>>) ->
     #ssh_msg_channel_extended_data{
        recipient_channel = Recipient,
@@ -464,7 +464,7 @@ decode(<<?BYTE(?SSH_MSG_EXT_INFO), ?UINT32(N), BinData/binary>>) ->
     Data = bin_foldr(
              fun(Bin,Acc) when length(Acc) == N ->
                      {Bin,Acc};
-                (<<?DEC_BIN(V0,__0), ?DEC_BIN(V1,__1), Rest/binary>>, Acc) -> 
+                (<<?DEC_BIN(V0,__0), ?DEC_BIN(V1,__1), Rest/binary>>, Acc) ->
                      {Rest,[{binary_to_list(V0),binary_to_list(V1)}|Acc]}
              end, [], BinData),
     #ssh_msg_ext_info{
@@ -609,7 +609,7 @@ ssh2_pubkey_encode({#'ECPoint'{point = Q}, {namedCurve,OID}}) ->
 ssh2_pubkey_decode(KeyBlob) ->
     {Key,_RestBlob} = ssh2_pubkey_decode2(KeyBlob),
     Key.
-    
+
 ssh2_pubkey_decode2(<<?UINT32(7), "ssh-rsa",
                       ?DEC_INT(E, _EL),
                       ?DEC_INT(N, _NL),
@@ -635,9 +635,22 @@ ssh2_pubkey_decode2(<<?DEC_BIN(SshCurveName,SCNL), Rest0/binary>>) ->
              <<?DEC_BIN(_Curve, _IL),
                ?DEC_BIN(Q, _QL),
                Rest1/binary>>} ->  {Q, Rest1};
-            
+
             {<<"ssh-ed",_/binary>>,
              <<?DEC_BIN(Key, _L),
+               Rest1/binary>>} ->  {Key, Rest1};
+
+            %% FIDO/security key types - sk-ecdsa-sha2-nistp256@openssh.com
+            {<<"sk-ecdsa-sha2-", _/binary>>,
+             <<?DEC_BIN(_Curve, _IL),
+               ?DEC_BIN(Q, _QL),
+               ?DEC_BIN(_Application, _AL),
+               Rest1/binary>>} ->  {Q, Rest1};
+
+            %% FIDO/security key types - sk-ssh-ed25519@openssh.com
+            {<<"sk-ssh-ed", _/binary>>,
+             <<?DEC_BIN(Key, _L),
+               ?DEC_BIN(_Application, _AL),
                Rest1/binary>>} ->  {Key, Rest1}
         end,
     OID = ssh_curvename2oid(SshCurveName),
@@ -709,7 +722,7 @@ ssh2_privkey_encode(#'ECPrivateKey'
       ?STRING(CurveName), % SIC!
       ?STRING(Q),
       ?STRING(Priv)>>.
-      
+
 %%%--------
 ssh2_privkey_decode2(<<?UINT32(7), "ssh-rsa",
                        ?DEC_INT(N, _NL), % Yes, N and E is reversed relative pubkey format
@@ -777,7 +790,10 @@ ssh_curvename2oid(<<"ssh-ed25519">>) -> ?'id-Ed25519';
 ssh_curvename2oid(<<"ssh-ed448">>  ) -> ?'id-Ed448';
 ssh_curvename2oid(<<"ecdsa-sha2-nistp256">>) -> ?'secp256r1';
 ssh_curvename2oid(<<"ecdsa-sha2-nistp384">>) -> ?'secp384r1';
-ssh_curvename2oid(<<"ecdsa-sha2-nistp521">>) -> ?'secp521r1'.
+ssh_curvename2oid(<<"ecdsa-sha2-nistp521">>) -> ?'secp521r1';
+%% FIDO/security key types
+ssh_curvename2oid(<<"sk-ecdsa-sha2-nistp256@openssh.com">>) -> ?'secp256r1';
+ssh_curvename2oid(<<"sk-ssh-ed25519@openssh.com">>) -> ?'id-Ed25519'.
 
 %% Description: Converts from elliptic curve OIDs to the ssh name.
 %%--------------------------------------------------------------------
@@ -786,6 +802,10 @@ oid2ssh_curvename(?'id-Ed448')  -> {<<"ssh-ed448">>,   'n/a'};
 oid2ssh_curvename(?'secp256r1') -> {<<"ecdsa-sha2-nistp256">>, <<"nistp256">>};
 oid2ssh_curvename(?'secp384r1') -> {<<"ecdsa-sha2-nistp384">>, <<"nistp384">>};
 oid2ssh_curvename(?'secp521r1') -> {<<"ecdsa-sha2-nistp521">>, <<"nistp521">>}.
+
+%% Note: FIDO keys use the same OIDs as their non-FIDO counterparts
+%% (sk-ecdsa uses secp256r1, sk-ed25519 uses id-Ed25519)
+%% The FIDO variant is distinguished by the key type string during parsing
 
 %%%================================================================
 %%%
