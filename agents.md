@@ -110,7 +110,6 @@ Each milestone is broken into atomic tasks below.
 - Parse:
   - Application string
   - Flags
-  - Key handle
 - Store in structured Erlang term
 
 **Done when**
