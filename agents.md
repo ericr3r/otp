@@ -106,14 +106,28 @@ Each milestone is broken into atomic tasks below.
 
 ---
 
-### Task 2.2: Parse FIDO Public Key Fields
+### Task 2.2: Parse FIDO Public Key Fields ✅
 - Parse:
   - Application string
   - Flags
+  - Key handle
 - Store in structured Erlang term
 
 **Done when**
-- Parsed key can round-trip without loss
+- ✅ Parsed key can round-trip without loss
+
+**Status**: COMPLETE ✅
+- Implemented extended tuple format for FIDO keys: `{{Key, SkData}, Rest}`
+- Added `ssh2_pubkey_decode_full/1` API to preserve FIDO metadata
+- Added `ssh2_pubkey_encode_sk/2` to encode FIDO keys with all fields
+- Added `parse_sk_options/1` to handle optional fields (flags, key_handle)
+- Application string now stored and preserved (required for signature verification)
+- Optional flags and key_handle fields parsed and stored (OpenSSH 8.3+)
+- Full round-trip preservation: FIDO key → decode → encode → identical FIDO key
+- Backward compatible: `ssh2_pubkey_decode/1` still works without FIDO metadata
+- Added 6 new tests, all passing (12/12 total tests pass)
+- No regressions in existing functionality
+- See `docs/task_2.2_implementation_notes.md` for full details
 
 ---
 

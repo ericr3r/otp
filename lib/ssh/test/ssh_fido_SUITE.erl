@@ -45,7 +45,13 @@
          round_trip_ecdsa_sk/1,
          round_trip_ed25519_sk/1,
          ecdsa_sk_key_type_mapping/1,
-         ed25519_sk_key_type_mapping/1
+         ed25519_sk_key_type_mapping/1,
+         parse_ecdsa_sk_with_application/1,
+         parse_ed25519_sk_with_application/1,
+         parse_ecdsa_sk_with_all_fields/1,
+         parse_ed25519_sk_with_all_fields/1,
+         round_trip_fido_full_ecdsa/1,
+         round_trip_fido_full_ed25519/1
         ]).
 
 %%--------------------------------------------------------------------
@@ -59,7 +65,8 @@ suite() ->
 all() ->
     [
      {group, fido_key_parsing},
-     {group, fido_key_encoding}
+     {group, fido_key_encoding},
+     {group, fido_field_parsing}
     ].
 
 groups() ->
@@ -73,7 +80,15 @@ groups() ->
      {fido_key_encoding, [], [
                               round_trip_ecdsa_sk,
                               round_trip_ed25519_sk
-                             ]}
+                             ]},
+     {fido_field_parsing, [], [
+                               parse_ecdsa_sk_with_application,
+                               parse_ed25519_sk_with_application,
+                               parse_ecdsa_sk_with_all_fields,
+                               parse_ed25519_sk_with_all_fields,
+                               round_trip_fido_full_ecdsa,
+                               round_trip_fido_full_ed25519
+                              ]}
     ].
 
 init_per_suite(Config) ->
@@ -220,6 +235,178 @@ round_trip_ed25519_sk(_Config) ->
 
     %% Verify it's valid (though it will be in non-FIDO format)
     _Key2 = ssh_message:ssh2_pubkey_decode(EncodedBlob),
+
+    ok.
+
+%% Test parsing ECDSA-SK key with application field preserved
+parse_ecdsa_sk_with_application(_Config) ->
+    KeyType = <<"sk-ecdsa-sha2-nistp256@openssh.com">>,
+    Curve = <<"nistp256">>,
+    ECPoint = <<4:8, 1:256, 2:256>>,
+    Application = <<"ssh:">>,
+
+    KeyBlob = <<?STRING(KeyType),
+                ?STRING(Curve),
+                ?STRING(ECPoint),
+                ?STRING(Application)>>,
+
+    %% Use decode_full to get FIDO metadata
+    {{Key, SkData}, _Rest} = ssh_message:ssh2_pubkey_decode_full(KeyBlob),
+
+    %% Verify key structure
+    {#'ECPoint'{point = ECPoint}, {namedCurve, ?'secp256r1'}} = Key,
+
+    %% Verify FIDO fields
+    Application = proplists:get_value(application, SkData),
+    undefined = proplists:get_value(flags, SkData),
+    undefined = proplists:get_value(key_handle, SkData),
+
+    ok.
+
+%% Test parsing Ed25519-SK key with application field preserved
+parse_ed25519_sk_with_application(_Config) ->
+    KeyType = <<"sk-ssh-ed25519@openssh.com">>,
+    PubKey = <<1:256>>,
+    Application = <<"ssh:">>,
+
+    KeyBlob = <<?STRING(KeyType),
+                ?STRING(PubKey),
+                ?STRING(Application)>>,
+
+    %% Use decode_full to get FIDO metadata
+    {{Key, SkData}, _Rest} = ssh_message:ssh2_pubkey_decode_full(KeyBlob),
+
+    %% Verify key structure
+    {#'ECPoint'{point = PubKey}, {namedCurve, ?'id-Ed25519'}} = Key,
+
+    %% Verify FIDO fields
+    Application = proplists:get_value(application, SkData),
+    undefined = proplists:get_value(flags, SkData),
+    undefined = proplists:get_value(key_handle, SkData),
+
+    ok.
+
+%% Test parsing ECDSA-SK key with all optional fields (OpenSSH 8.3+)
+parse_ecdsa_sk_with_all_fields(_Config) ->
+    KeyType = <<"sk-ecdsa-sha2-nistp256@openssh.com">>,
+    Curve = <<"nistp256">>,
+    ECPoint = <<4:8, 1:256, 2:256>>,
+    Application = <<"ssh:">>,
+    Flags = 1,  %% User presence verified
+    KeyHandle = <<"test_key_handle_blob">>,
+
+    KeyBlob = <<?STRING(KeyType),
+                ?STRING(Curve),
+                ?STRING(ECPoint),
+                ?STRING(Application),
+                ?UINT32(Flags),
+                ?STRING(KeyHandle)>>,
+
+    %% Use decode_full to get FIDO metadata
+    {{Key, SkData}, _Rest} = ssh_message:ssh2_pubkey_decode_full(KeyBlob),
+
+    %% Verify key structure
+    {#'ECPoint'{point = ECPoint}, {namedCurve, ?'secp256r1'}} = Key,
+
+    %% Verify all FIDO fields are preserved
+    Application = proplists:get_value(application, SkData),
+    Flags = proplists:get_value(flags, SkData),
+    KeyHandle = proplists:get_value(key_handle, SkData),
+
+    ok.
+
+%% Test parsing Ed25519-SK key with all optional fields (OpenSSH 8.3+)
+parse_ed25519_sk_with_all_fields(_Config) ->
+    KeyType = <<"sk-ssh-ed25519@openssh.com">>,
+    PubKey = <<1:256>>,
+    Application = <<"ssh:">>,
+    Flags = 5,  %% User presence + verification (PIN/biometric)
+    KeyHandle = <<"another_key_handle">>,
+
+    KeyBlob = <<?STRING(KeyType),
+                ?STRING(PubKey),
+                ?STRING(Application),
+                ?UINT32(Flags),
+                ?STRING(KeyHandle)>>,
+
+    %% Use decode_full to get FIDO metadata
+    {{Key, SkData}, _Rest} = ssh_message:ssh2_pubkey_decode_full(KeyBlob),
+
+    %% Verify key structure
+    {#'ECPoint'{point = PubKey}, {namedCurve, ?'id-Ed25519'}} = Key,
+
+    %% Verify all FIDO fields are preserved
+    Application = proplists:get_value(application, SkData),
+    Flags = proplists:get_value(flags, SkData),
+    KeyHandle = proplists:get_value(key_handle, SkData),
+
+    ok.
+
+%% Test full round-trip for ECDSA-SK with all fields
+round_trip_fido_full_ecdsa(_Config) ->
+    KeyType = <<"sk-ecdsa-sha2-nistp256@openssh.com">>,
+    Curve = <<"nistp256">>,
+    ECPoint = <<4:8, 1:256, 2:256>>,
+    Application = <<"ssh:">>,
+    Flags = 1,
+    KeyHandle = <<"test_handle">>,
+
+    OriginalBlob = <<?STRING(KeyType),
+                     ?STRING(Curve),
+                     ?STRING(ECPoint),
+                     ?STRING(Application),
+                     ?UINT32(Flags),
+                     ?STRING(KeyHandle)>>,
+
+    %% Decode with full metadata
+    {{Key, SkData}, <<>>} = ssh_message:ssh2_pubkey_decode_full(OriginalBlob),
+
+    %% Encode back (should preserve FIDO format)
+    EncodedBlob = ssh_message:ssh2_pubkey_encode({Key, SkData}),
+
+    %% Decode again and verify all fields match
+    {{Key2, SkData2}, <<>>} = ssh_message:ssh2_pubkey_decode_full(EncodedBlob),
+
+    %% Verify key is the same
+    Key = Key2,
+
+    %% Verify all FIDO fields are preserved
+    Application = proplists:get_value(application, SkData2),
+    Flags = proplists:get_value(flags, SkData2),
+    KeyHandle = proplists:get_value(key_handle, SkData2),
+
+    ok.
+
+%% Test full round-trip for Ed25519-SK with all fields
+round_trip_fido_full_ed25519(_Config) ->
+    KeyType = <<"sk-ssh-ed25519@openssh.com">>,
+    PubKey = <<1:256>>,
+    Application = <<"ssh:">>,
+    Flags = 5,
+    KeyHandle = <<"ed25519_handle">>,
+
+    OriginalBlob = <<?STRING(KeyType),
+                     ?STRING(PubKey),
+                     ?STRING(Application),
+                     ?UINT32(Flags),
+                     ?STRING(KeyHandle)>>,
+
+    %% Decode with full metadata
+    {{Key, SkData}, <<>>} = ssh_message:ssh2_pubkey_decode_full(OriginalBlob),
+
+    %% Encode back (should preserve FIDO format)
+    EncodedBlob = ssh_message:ssh2_pubkey_encode({Key, SkData}),
+
+    %% Decode again and verify all fields match
+    {{Key2, SkData2}, <<>>} = ssh_message:ssh2_pubkey_decode_full(EncodedBlob),
+
+    %% Verify key is the same
+    Key = Key2,
+
+    %% Verify all FIDO fields are preserved
+    Application = proplists:get_value(application, SkData2),
+    Flags = proplists:get_value(flags, SkData2),
+    KeyHandle = proplists:get_value(key_handle, SkData2),
 
     ok.
 

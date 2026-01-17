@@ -36,6 +36,7 @@
 
 -export([encode/1, decode/1, decode_keyboard_interactive_prompts/2]).
 -export([ssh2_pubkey_decode/1,
+         ssh2_pubkey_decode_full/1,
          ssh2_pubkey_encode/1,
          ssh2_privkey_decode2/1,
          oid2ssh_curvename/1,
@@ -603,12 +604,82 @@ ssh2_pubkey_encode(#'ECPrivateKey'{parameters = {namedCurve,OID},
 
 ssh2_pubkey_encode({#'ECPoint'{point = Q}, {namedCurve,OID}}) ->
     {KeyType,Curve} = oid2ssh_curvename(OID),
-    <<?STRING(KeyType), ?STRING(Curve), ?Estring(Q)>>.
+    <<?STRING(KeyType), ?STRING(Curve), ?Estring(Q)>>;
+
+%% Handle FIDO/SK keys with extended tuple format (key + metadata)
+ssh2_pubkey_encode({{#'ECPoint'{point = Q}, {namedCurve,OID}}, SkData}) when is_list(SkData) ->
+    ssh2_pubkey_encode_sk({#'ECPoint'{point = Q}, {namedCurve,OID}}, SkData).
+
+%% Encode FIDO/SK public keys with application and optional fields
+%% Currently not used - FIDO keys are encoded as regular keys
+%% This will be needed when full FIDO support is implemented
+ssh2_pubkey_encode_sk({#'ECPoint'{point = Q}, {namedCurve, OID}}, SkData) ->
+    case proplists:get_value(application, SkData) of
+        undefined ->
+            %% No FIDO data, encode as regular key
+            ssh2_pubkey_encode({#'ECPoint'{point = Q}, {namedCurve, OID}});
+        Application ->
+            %% Determine if this is ECDSA-SK or Ed25519-SK based on OID
+            case OID of
+                ?'secp256r1' ->
+                    %% ECDSA-SK
+                    KeyType = <<"sk-ecdsa-sha2-nistp256@openssh.com">>,
+                    Curve = <<"nistp256">>,
+                    Base = <<?STRING(KeyType), ?STRING(Curve), ?Estring(Q), ?STRING(Application)>>,
+                    encode_sk_options(Base, SkData);
+                ?'id-Ed25519' ->
+                    %% Ed25519-SK
+                    KeyType = <<"sk-ssh-ed25519@openssh.com">>,
+                    Base = <<?STRING(KeyType), ?Estring(Q), ?STRING(Application)>>,
+                    encode_sk_options(Base, SkData);
+                _ ->
+                    %% Unknown OID for FIDO, encode as regular key
+                    ssh2_pubkey_encode({#'ECPoint'{point = Q}, {namedCurve, OID}})
+            end
+    end.
+
+%% Encode optional FIDO fields (flags and key_handle)
+encode_sk_options(Base, SkData) ->
+    case {proplists:get_value(flags, SkData), proplists:get_value(key_handle, SkData)} of
+        {undefined, undefined} ->
+            %% No optional fields
+            Base;
+        {Flags, KeyHandle} when is_integer(Flags), is_binary(KeyHandle) ->
+            %% Both fields present
+            <<Base/binary, ?UINT32(Flags), ?STRING(KeyHandle)>>;
+        {Flags, undefined} when is_integer(Flags) ->
+            %% Only flags (unusual, but handle it)
+            <<Base/binary, ?UINT32(Flags)>>;
+        {undefined, _KeyHandle} ->
+            %% Key handle without flags is invalid, skip optional fields
+            Base;
+        _ ->
+            %% Invalid field types, skip optional fields
+            Base
+    end.
 
 %%%--------
+%% ssh2_pubkey_decode/1 - Returns key only (backward compatible)
 ssh2_pubkey_decode(KeyBlob) ->
-    {Key,_RestBlob} = ssh2_pubkey_decode2(KeyBlob),
-    Key.
+    case ssh2_pubkey_decode2(KeyBlob) of
+        {Key, _RestBlob} ->
+            %% Regular key (2-tuple result)
+            Key;
+        {Key, _SkData, _RestBlob} ->
+            %% FIDO key (3-tuple result) - return just the key for compatibility
+            Key
+    end.
+
+%% ssh2_pubkey_decode_full/1 - Returns key with FIDO metadata preserved
+ssh2_pubkey_decode_full(KeyBlob) ->
+    case ssh2_pubkey_decode2(KeyBlob) of
+        {Key, RestBlob} ->
+            %% Regular key (2-tuple result)
+            {Key, RestBlob};
+        {Key, SkData, RestBlob} ->
+            %% FIDO key (3-tuple result) - return extended tuple
+            {{Key, SkData}, RestBlob}
+    end.
 
 ssh2_pubkey_decode2(<<?UINT32(7), "ssh-rsa",
                       ?DEC_INT(E, _EL),
@@ -629,33 +700,51 @@ ssh2_pubkey_decode2(<<?UINT32(7), "ssh-dss",
      }, Rest};
 
 ssh2_pubkey_decode2(<<?DEC_BIN(SshCurveName,SCNL), Rest0/binary>>) ->
-    {Pub, Rest} =
-        case {SshCurveName, Rest0} of
-            {<<"ecdsa-sha2-", _/binary>>,
-             <<?DEC_BIN(_Curve, _IL),
-               ?DEC_BIN(Q, _QL),
-               Rest1/binary>>} ->  {Q, Rest1};
+    case {SshCurveName, Rest0} of
+        {<<"ecdsa-sha2-", _/binary>>,
+         <<?DEC_BIN(_Curve, _IL),
+           ?DEC_BIN(Q, _QL),
+           Rest1/binary>>} ->
+            OID = ssh_curvename2oid(SshCurveName),
+            {{#'ECPoint'{point = Q}, {namedCurve,OID}}, Rest1};
 
-            {<<"ssh-ed",_/binary>>,
-             <<?DEC_BIN(Key, _L),
-               Rest1/binary>>} ->  {Key, Rest1};
+        {<<"ssh-ed",_/binary>>,
+         <<?DEC_BIN(Key, _L),
+           Rest1/binary>>} ->
+            OID = ssh_curvename2oid(SshCurveName),
+            {{#'ECPoint'{point = Key}, {namedCurve,OID}}, Rest1};
 
-            %% FIDO/security key types - sk-ecdsa-sha2-nistp256@openssh.com
-            {<<"sk-ecdsa-sha2-", _/binary>>,
-             <<?DEC_BIN(_Curve, _IL),
-               ?DEC_BIN(Q, _QL),
-               ?DEC_BIN(_Application, _AL),
-               Rest1/binary>>} ->  {Q, Rest1};
+        %% FIDO/security key types - sk-ecdsa-sha2-nistp256@openssh.com
+        {<<"sk-ecdsa-sha2-", _/binary>>,
+         <<?DEC_BIN(_Curve, _IL),
+           ?DEC_BIN(Q, _QL),
+           ?DEC_BIN(Application, _AL),
+           Rest1/binary>>} ->
+            OID = ssh_curvename2oid(SshCurveName),
+            {Flags, KeyHandle, Rest2} = parse_sk_options(Rest1),
+            {{#'ECPoint'{point = Q}, {namedCurve,OID}},
+             [{application, Application}, {flags, Flags}, {key_handle, KeyHandle}],
+             Rest2};
 
-            %% FIDO/security key types - sk-ssh-ed25519@openssh.com
-            {<<"sk-ssh-ed", _/binary>>,
-             <<?DEC_BIN(Key, _L),
-               ?DEC_BIN(_Application, _AL),
-               Rest1/binary>>} ->  {Key, Rest1}
-        end,
-    OID = ssh_curvename2oid(SshCurveName),
-    {{#'ECPoint'{point = Pub}, {namedCurve,OID}},
-     Rest}.
+        %% FIDO/security key types - sk-ssh-ed25519@openssh.com
+        {<<"sk-ssh-ed", _/binary>>,
+         <<?DEC_BIN(Key, _L),
+           ?DEC_BIN(Application, _AL),
+           Rest1/binary>>} ->
+            OID = ssh_curvename2oid(SshCurveName),
+            {Flags, KeyHandle, Rest2} = parse_sk_options(Rest1),
+            {{#'ECPoint'{point = Key}, {namedCurve,OID}},
+             [{application, Application}, {flags, Flags}, {key_handle, KeyHandle}],
+             Rest2}
+    end.
+
+%% Parse optional FIDO/SK fields (flags and key_handle)
+%% These fields were added in OpenSSH 8.3+
+parse_sk_options(<<?UINT32(Flags), ?DEC_BIN(KeyHandle, _KHL), Rest/binary>>) ->
+    {Flags, KeyHandle, Rest};
+parse_sk_options(Rest) ->
+    %% No optional fields present (OpenSSH < 8.3 or public key only)
+    {undefined, undefined, Rest}.
 
 %%%-------- private key --------
 
