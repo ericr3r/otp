@@ -51,7 +51,11 @@
          parse_ecdsa_sk_with_all_fields/1,
          parse_ed25519_sk_with_all_fields/1,
          round_trip_fido_full_ecdsa/1,
-         round_trip_fido_full_ed25519/1
+         round_trip_fido_full_ed25519/1,
+         parse_real_ecdsa_sk_pubkey_file/1,
+         parse_real_ed25519_sk_pubkey_file/1,
+         parse_real_ecdsa_sk_full_pubkey_file/1,
+         parse_real_ed25519_sk_full_pubkey_file/1
         ]).
 
 %%--------------------------------------------------------------------
@@ -66,7 +70,8 @@ all() ->
     [
      {group, fido_key_parsing},
      {group, fido_key_encoding},
-     {group, fido_field_parsing}
+     {group, fido_field_parsing},
+     {group, fido_real_key_files}
     ].
 
 groups() ->
@@ -88,7 +93,13 @@ groups() ->
                                parse_ed25519_sk_with_all_fields,
                                round_trip_fido_full_ecdsa,
                                round_trip_fido_full_ed25519
-                              ]}
+                              ]},
+     {fido_real_key_files, [], [
+                                parse_real_ecdsa_sk_pubkey_file,
+                                parse_real_ed25519_sk_pubkey_file,
+                                parse_real_ecdsa_sk_full_pubkey_file,
+                                parse_real_ed25519_sk_full_pubkey_file
+                               ]}
     ].
 
 init_per_suite(Config) ->
@@ -100,7 +111,8 @@ init_per_suite(Config) ->
         ok -> ok;
         {error, {already_started, ssh}} -> ok
     end,
-    Config.
+    DataDir = proplists:get_value(data_dir, Config),
+    [{data_dir, DataDir} | Config].
 
 end_per_suite(_Config) ->
     application:stop(ssh),
@@ -407,6 +419,108 @@ round_trip_fido_full_ed25519(_Config) ->
     Application = proplists:get_value(application, SkData2),
     Flags = proplists:get_value(flags, SkData2),
     KeyHandle = proplists:get_value(key_handle, SkData2),
+
+    ok.
+
+%%--------------------------------------------------------------------
+%% Test Case 2.3: Parse real FIDO public key files
+%%--------------------------------------------------------------------
+
+%% Test parsing a real ECDSA-SK public key file (basic format)
+parse_real_ecdsa_sk_pubkey_file(Config) ->
+    DataDir = proplists:get_value(data_dir, Config),
+    KeyFile = filename:join(DataDir, "id_ecdsa_sk.pub"),
+
+    %% Read the public key file
+    {ok, RawData} = file:read_file(KeyFile),
+
+    %% Decode using ssh_file module (openssh_key format)
+    [{PubKey, Attributes}] = ssh_file:decode(RawData, openssh_key),
+
+    %% Verify it's an ECDSA key
+    {#'ECPoint'{}, {namedCurve, ?'secp256r1'}} = PubKey,
+
+    %% Verify attributes contain comment
+    true = is_list(Attributes),
+
+    ct:log("Successfully parsed ECDSA-SK key from file: ~p~n"
+           "Key: ~p~n"
+           "Attributes: ~p~n", [KeyFile, PubKey, Attributes]),
+
+    ok.
+
+%% Test parsing a real Ed25519-SK public key file (basic format)
+parse_real_ed25519_sk_pubkey_file(Config) ->
+    DataDir = proplists:get_value(data_dir, Config),
+    KeyFile = filename:join(DataDir, "id_ed25519_sk.pub"),
+
+    %% Read the public key file
+    {ok, RawData} = file:read_file(KeyFile),
+
+    %% Decode using ssh_file module (openssh_key format)
+    [{PubKey, Attributes}] = ssh_file:decode(RawData, openssh_key),
+
+    %% Verify it's an Ed25519 key
+    {#'ECPoint'{point = Point}, {namedCurve, ?'id-Ed25519'}} = PubKey,
+
+    %% Ed25519 public keys should be 32 bytes
+    32 = byte_size(Point),
+
+    %% Verify attributes contain comment
+    true = is_list(Attributes),
+
+    ct:log("Successfully parsed Ed25519-SK key from file: ~p~n"
+           "Key: ~p~n"
+           "Attributes: ~p~n", [KeyFile, PubKey, Attributes]),
+
+    ok.
+
+%% Test parsing a real ECDSA-SK public key file with all fields (OpenSSH 8.3+)
+parse_real_ecdsa_sk_full_pubkey_file(Config) ->
+    DataDir = proplists:get_value(data_dir, Config),
+    KeyFile = filename:join(DataDir, "id_ecdsa_sk_full.pub"),
+
+    %% Read the public key file
+    {ok, RawData} = file:read_file(KeyFile),
+
+    %% Decode using ssh_file module (openssh_key format)
+    [{PubKey, Attributes}] = ssh_file:decode(RawData, openssh_key),
+
+    %% Verify it's an ECDSA key
+    {#'ECPoint'{}, {namedCurve, ?'secp256r1'}} = PubKey,
+
+    %% Verify attributes contain comment
+    true = is_list(Attributes),
+
+    ct:log("Successfully parsed ECDSA-SK key (full format) from file: ~p~n"
+           "Key: ~p~n"
+           "Attributes: ~p~n", [KeyFile, PubKey, Attributes]),
+
+    ok.
+
+%% Test parsing a real Ed25519-SK public key file with all fields (OpenSSH 8.3+)
+parse_real_ed25519_sk_full_pubkey_file(Config) ->
+    DataDir = proplists:get_value(data_dir, Config),
+    KeyFile = filename:join(DataDir, "id_ed25519_sk_full.pub"),
+
+    %% Read the public key file
+    {ok, RawData} = file:read_file(KeyFile),
+
+    %% Decode using ssh_file module (openssh_key format)
+    [{PubKey, Attributes}] = ssh_file:decode(RawData, openssh_key),
+
+    %% Verify it's an Ed25519 key
+    {#'ECPoint'{point = Point}, {namedCurve, ?'id-Ed25519'}} = PubKey,
+
+    %% Ed25519 public keys should be 32 bytes
+    32 = byte_size(Point),
+
+    %% Verify attributes contain comment
+    true = is_list(Attributes),
+
+    ct:log("Successfully parsed Ed25519-SK key (full format) from file: ~p~n"
+           "Key: ~p~n"
+           "Attributes: ~p~n", [KeyFile, PubKey, Attributes]),
 
     ok.
 

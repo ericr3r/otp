@@ -1,0 +1,166 @@
+================================================================================
+                    Task 2.3: FIDO Key Parsing Test Structure
+================================================================================
+
+ssh_fido_SUITE.erl Test Groups:
+└── all()
+    ├── [Group 1] fido_key_parsing           (Existing)
+    │   ├── decode_ecdsa_sk_pubkey
+    │   ├── decode_ed25519_sk_pubkey
+    │   ├── ecdsa_sk_key_type_mapping
+    │   └── ed25519_sk_key_type_mapping
+    │
+    ├── [Group 2] fido_key_encoding          (Existing)
+    │   ├── round_trip_ecdsa_sk
+    │   └── round_trip_ed25519_sk
+    │
+    ├── [Group 3] fido_field_parsing         (Existing)
+    │   ├── parse_ecdsa_sk_with_application
+    │   ├── parse_ed25519_sk_with_application
+    │   ├── parse_ecdsa_sk_with_all_fields
+    │   ├── parse_ed25519_sk_with_all_fields
+    │   ├── round_trip_fido_full_ecdsa
+    │   └── round_trip_fido_full_ed25519
+    │
+    └── [Group 4] fido_real_key_files        ★ NEW - TASK 2.3 ★
+        ├── parse_real_ecdsa_sk_pubkey_file
+        │   └── Tests: id_ecdsa_sk.pub (basic format)
+        │
+        ├── parse_real_ed25519_sk_pubkey_file
+        │   └── Tests: id_ed25519_sk.pub (basic format)
+        │
+        ├── parse_real_ecdsa_sk_full_pubkey_file
+        │   └── Tests: id_ecdsa_sk_full.pub (with flags + key_handle)
+        │
+        └── parse_real_ed25519_sk_full_pubkey_file
+            └── Tests: id_ed25519_sk_full.pub (with flags + key_handle)
+
+================================================================================
+                               Test Data Files
+================================================================================
+
+ssh_fido_SUITE_data/
+├── id_ecdsa_sk.pub                    ★ NEW ★
+│   └── sk-ecdsa-sha2-nistp256@openssh.com
+│       Format: key-type | curve | ec-point | application
+│
+├── id_ed25519_sk.pub                  ★ NEW ★
+│   └── sk-ssh-ed25519@openssh.com
+│       Format: key-type | public-key | application
+│
+├── id_ecdsa_sk_full.pub               ★ NEW ★
+│   └── sk-ecdsa-sha2-nistp256@openssh.com + flags + key_handle
+│
+├── id_ed25519_sk_full.pub             ★ NEW ★
+│   └── sk-ssh-ed25519@openssh.com + flags + key_handle
+│
+├── README.md                          ★ NEW ★
+├── TASK_2.3_SUMMARY.md                ★ NEW ★
+├── COMPARISON_WITH_SSH_PUBKEY_SUITE.md ★ NEW ★
+├── QUICKSTART.md                      ★ NEW ★
+└── TEST_STRUCTURE.txt                 ★ NEW ★ (this file)
+
+================================================================================
+                              Test Execution Flow
+================================================================================
+
+1. init_per_suite(Config)
+   └── Start crypto and ssh applications
+   └── Store data_dir in Config
+
+2. init_per_group(fido_real_key_files, Config)
+   └── No special setup needed
+
+3. For each test case:
+   
+   Test Case: parse_real_ecdsa_sk_pubkey_file(Config)
+   ├── 1. Get DataDir from Config
+   ├── 2. Read id_ecdsa_sk.pub file
+   ├── 3. Decode with ssh_file:decode(RawData, openssh_key)
+   ├── 4. Verify key structure:
+   │   └── {#'ECPoint'{}, {namedCurve, ?'secp256r1'}}
+   ├── 5. Verify attributes list
+   ├── 6. Log success with details
+   └── 7. Return ok
+
+   [Similar flow for other 3 test cases]
+
+4. end_per_group(fido_real_key_files, Config)
+   └── No cleanup needed
+
+5. end_per_suite(Config)
+   └── Stop ssh and crypto applications
+
+================================================================================
+                          Key Format Specifications
+================================================================================
+
+OpenSSH Public Key File Format:
++------------------+--------------------+---------------+
+| Key Type String  | Base64 Encoded Key | Comment       |
++------------------+--------------------+---------------+
+       |                    |                  |
+       |                    |                  └─ Optional: "user@host"
+       |                    |
+       |                    └─ Wire format encoding of:
+       |                       - Key type (again)
+       |                       - Curve/algorithm params
+       |                       - Public key material
+       |                       - Application string
+       |                       - [Optional: flags]
+       |                       - [Optional: key_handle]
+       |
+       └─ "sk-ecdsa-sha2-nistp256@openssh.com" or
+          "sk-ssh-ed25519@openssh.com"
+
+ECDSA-SK Wire Format (inside base64):
+┌─────────────────────────────────────────────────────────────┐
+│ string: "sk-ecdsa-sha2-nistp256@openssh.com"                │
+│ string: "nistp256"                                          │
+│ string: EC point (65 bytes: 0x04 || X || Y)                │
+│ string: "ssh:"                         ◄─ Application      │
+│ [uint32: flags]                        ◄─ Optional (8.3+)  │
+│ [string: key_handle]                   ◄─ Optional (8.3+)  │
+└─────────────────────────────────────────────────────────────┘
+
+Ed25519-SK Wire Format (inside base64):
+┌─────────────────────────────────────────────────────────────┐
+│ string: "sk-ssh-ed25519@openssh.com"                        │
+│ string: Public key (32 bytes)                               │
+│ string: "ssh:"                         ◄─ Application      │
+│ [uint32: flags]                        ◄─ Optional (8.3+)  │
+│ [string: key_handle]                   ◄─ Optional (8.3+)  │
+└─────────────────────────────────────────────────────────────┘
+
+================================================================================
+                           Parallel with ssh_pubkey_SUITE
+================================================================================
+
+ssh_pubkey_SUITE_data/              ssh_fido_SUITE_data/
+├── openssh_rsa_pub          ←→    ├── id_ecdsa_sk.pub
+├── openssh_dsa_pub          ←→    ├── id_ed25519_sk.pub
+├── openssh_ecdsa_pub        ←→    ├── id_ecdsa_sk_full.pub
+└── ...                             └── id_ed25519_sk_full.pub
+
+Test Pattern:                       Test Pattern:
+ssh_rsa_public_key(Config) ->       parse_real_ecdsa_sk_pubkey_file(Config) ->
+  DataDir = ...,                      DataDir = ...,
+  file:read_file(...),                file:read_file(...),
+  ssh_file:decode(...),               ssh_file:decode(...),
+  verify structure,                   verify structure,
+  ok.                                 ok.
+
+================================================================================
+                              Success Criteria
+================================================================================
+
+✓ All 4 test cases pass
+✓ Keys parse without errors
+✓ Correct OID verification (secp256r1, id-Ed25519)
+✓ Attributes extracted correctly
+✓ Logs show detailed parsing information
+✓ No compilation warnings or errors
+✓ Follows ssh_pubkey_SUITE patterns
+✓ Comprehensive documentation provided
+
+================================================================================
