@@ -24,6 +24,7 @@ comparison against OpenSSH behavior at each stage.
 - **No proprietary libraries**
 - Avoid breaking existing `ssh` public key auth
 - Prefer pure Erlang where feasible, NIFs only if unavoidable
+- **Do NOT add new public exported functions** — use existing exported functions and add new function heads via pattern matching to support the new FIDO key types
 
 ---
 
@@ -43,7 +44,7 @@ Each milestone is broken into atomic tasks below.
 
 ## Milestone 1: Research & Ground Truth
 
-### Task 1.1: Document OpenSSH `-sk` Behavior ✅
+### Task 1.1: Document OpenSSH `-sk` Behavior
 - Identify key types:
   - `ecdsa-sk`
   - `ed25519-sk`
@@ -52,61 +53,48 @@ Each milestone is broken into atomic tasks below.
   - Signature structure
   - Authenticator flags
 - Output:
-  - `docs/fido_ssh_notes.md` ✅
+  - `docs/fido_ssh_notes.md`
 
 **Done when**
-- ✅ Formats are written down with byte-level detail
-- ✅ At least one real key inspected via `ssh-keygen -vv`
+- Formats are written down with byte-level detail
+- At least one real key inspected via `ssh-keygen -vv`
 
-**Status**: COMPLETE - See `docs/fido_ssh_notes.md`
+**Status**: NOT STARTED
 
 ---
 
-### Task 1.2: Locate OTP SSH Touchpoints ✅
+### Task 1.2: Locate OTP SSH Touchpoints
 - Identify:
   - Key parsing modules
   - Signature verification code paths
   - Auth callback interfaces
 - Output:
-  - Commented call graph or notes ✅
+  - Commented call graph or notes
 
 **Done when**
-- ✅ Entry points for new key types are clearly identified
+- Entry points for new key types are clearly identified
 
-**Status**: COMPLETE - See `docs/otp_ssh_touchpoints.md`
-- Key modules identified: ssh_message.erl, ssh_transport.erl, ssh_auth.erl
-- Full call graphs documented
-- Implementation strategy outlined
+**Status**: NOT STARTED
 
 ---
 
 ## Milestone 2: Public Key Parsing
 
-### Task 2.1: Add Key Type Recognition ✅
+### Task 2.1: Add Key Type Recognition
 - Accept 2 key types (each has a short form and full form):
   - **ECDSA-SK**: `ecdsa-sk` or `sk-ecdsa-sha2-nistp256@openssh.com`
   - **Ed25519-SK**: `ed25519-sk` or `sk-ssh-ed25519@openssh.com`
 - No functional behavior yet
 
 **Done when**
-- ✅ Both key types are recognized without crashing
-- ✅ Unknown fields are preserved (application field parsed but discarded)
+- Both key types are recognized without crashing
+- Unknown fields are preserved (application field parsed but discarded)
 
-**Status**: COMPLETE ✅
-- Modified `ssh_message.erl` to parse FIDO key formats
-- Added key type to OID mappings for both FIDO key types
-- Created comprehensive test suite `ssh_fido_SUITE.erl` (6 tests, all passing)
-- Created regression test suite `test_fido_regression.erl` (5 tests, all passing)
-- Added to test Makefile
-- **Test Results**: 11/11 tests passed (100% pass rate)
-- No compilation errors or warnings
-- No regressions detected in existing SSH functionality
-- See `TASK_2.1_TEST_RESULTS.md` for full test report
-- See `docs/task_2.1_implementation_notes.md` for implementation details
+**Status**: NOT STARTED
 
 ---
 
-### Task 2.2: Parse FIDO Public Key Fields ✅
+### Task 2.2: Parse FIDO Public Key Fields
 - Parse:
   - Application string
   - Flags
@@ -114,20 +102,9 @@ Each milestone is broken into atomic tasks below.
 - Store in structured Erlang term
 
 **Done when**
-- ✅ Parsed key can round-trip without loss
+- Parsed key can round-trip without loss
 
-**Status**: COMPLETE ✅
-- Implemented extended tuple format for FIDO keys: `{{Key, SkData}, Rest}`
-- Added `ssh2_pubkey_decode_full/1` API to preserve FIDO metadata
-- Added `ssh2_pubkey_encode_sk/2` to encode FIDO keys with all fields
-- Added `parse_sk_options/1` to handle optional fields (flags, key_handle)
-- Application string now stored and preserved (required for signature verification)
-- Optional flags and key_handle fields parsed and stored (OpenSSH 8.3+)
-- Full round-trip preservation: FIDO key → decode → encode → identical FIDO key
-- Backward compatible: `ssh2_pubkey_decode/1` still works without FIDO metadata
-- Added 6 new tests, all passing (12/12 total tests pass)
-- No regressions in existing functionality
-- See `docs/task_2.2_implementation_notes.md` for full details
+**Status**: NOT STARTED
 
 ---
 
