@@ -206,6 +206,40 @@ items 18 and 21):
 **Done when**
 - Signatures parse without errors
 
+**Code changes:**
+
+1. `ssh_transport.erl` — `supported_algorithms(public_key)` (L231): add
+   `'sk-ssh-ed25519@openssh.com'` and `'sk-ecdsa-sha2-nistp256@openssh.com'`
+   at top of list.  Crypto requirements identical to non-SK counterparts.
+2. `ssh_transport.erl` — `default_algorithms1(public_key)` (L197): add both
+   SK atoms to the blacklist.  SK algorithms are in `supported_algorithms` but
+   disabled by default until `do_verify/5` handles SK sigs (Milestone 3.2).
+3. `ssh_transport.erl` — `sha/1` (L2303): add 2 heads mapping SK atoms to
+   `sha256` (ECDSA-SK) and `undefined` (Ed25519-SK, prehashed).
+4. `ssh_transport.erl` — `valid_key_sha_alg/3` (L2276): add 2 heads before
+   catch-all accepting SK key tuples with their algorithm atoms (public only).
+5. `ssh_transport.erl` — `public_algo/1` (L2288): add 2 heads mapping SK key
+   tuples to their wire-format algorithm atoms.
+6. `ssh_auth.erl` — `verify_sig/7` (L563): add new SK-aware clause (guard on
+   algorithm binary) that parses SK signature format
+   (`inner_sig_string || flags_byte || counter_u32`) before delegating to
+   `ssh_transport:verify/5`.  The existing clause would `badmatch` on the 5
+   trailing bytes.
+7. `ssh_auth.erl` — `key_alg/1` (L594): add 2 identity-mapping heads for SK
+   algorithm atoms (no aliasing like RSA).
+
+**Tests** (6 new, in `ssh_pubkey_SUITE.erl` `ssh_public_key_decode_encode` group):
+- `sk_supported_algorithms` — SK in supported, not in default
+- `sk_sha_mapping` — `sha/1` returns correct hash for both SK types
+- `sk_valid_key_sha_alg` — correct pairings `true`, cross-type/non-SK `false`
+- `sk_public_algo` — correct algorithm atom for both SK key tuples
+- `sk_verify_sig_parse_ecdsa` — well-formed ECDSA-SK sig blob through
+  `verify/5` returns `false` (no crash); catch-all `do_verify` rejects
+  unknown key type gracefully
+- `sk_verify_sig_parse_ed25519` — same for Ed25519-SK
+
+**Status**: COMPLETE ✅
+
 ---
 
 ### Task 3.2: Verify Signature Without User Presence
