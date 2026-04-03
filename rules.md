@@ -29,6 +29,7 @@ comparison against OpenSSH behavior at each stage.
 - Avoid breaking existing `ssh` public key auth
 - Prefer pure Erlang where feasible, NIFs only if unavoidable
 - **Do NOT add new public exported functions** — use existing exported functions and add new function heads via pattern matching to support the new FIDO key types
+- **Test coverage must not regress** — for every modified module (`ssh_message`, `ssh_transport`, `ssh_auth`, `ssh_file`), test coverage after changes must match or exceed the coverage baseline before changes.  Measure with the existing `ssh.cover` / `ssh_all.cover` configurations and Common Test's coverage support.  New code paths (SK-specific function heads, FIDO blob construction, etc.) must be exercised by at least Tier 1 or Tier 2 tests.
 
 ---
 
@@ -41,6 +42,7 @@ comparison against OpenSSH behavior at each stage.
 5. ~~Hardware interaction~~ (out of scope — signing requires hardware; not needed for server-side verification)
 6. Testing & interoperability
 7. Documentation & cleanup
+8. Docker image with `sk-dummy.so` (optional)
 
 Each milestone is broken into atomic tasks below.
 
@@ -182,26 +184,73 @@ No tasks in this milestone will be implemented.
 
 ## Milestone 6: Testing & Interop
 
-### Task 6.1: Golden Test Vectors
-- Capture:
-  - Public key
-  - Signature
-  - Challenge
-- Store as fixtures
+All FIDO testing must work **without real hardware**.  Tests are organized in
+three tiers; Tiers 1 and 2 always run, Tier 3 is optional and gated on the
+availability of OpenSSH's `sk-dummy.so` software token.
+
+### Task 6.1: Tier 1 — Synthetic Unit Tests (always runs)
+- Generate regular ECDSA P-256 and Ed25519 key pairs with OTP `crypto`
+- Manually construct the 69-byte FIDO authenticator blob
+  (`SHA-256(application) || flags || counter || SHA-256(M)`)
+- Sign the blob with the generated private key
+- Package the signature in SK wire format
+  (ECDSA: `mpint(r) || mpint(s) || flags || counter`;
+   Ed25519: `sig_64bytes || flags || counter`)
+- Feed through `do_verify/5` and `verify_sig/7` code paths
+- Test cases:
+  - Correct signature verifies (`true`)
+  - Wrong application string → `false`
+  - Tampered flags/counter → `false`
+  - Signature from a different key → `false`
+  - `mpint` r/s with high-bit padding (33-byte encoding) → still verifies
+- Run existing OTP SSH test suites (`ssh_basic_SUITE`, etc.) to confirm
+  zero regressions in non-SK key handling
 
 **Done when**
-- Tests pass without hardware
+- All synthetic verification tests pass for both key types
+- No regressions in existing SSH test suites
 
 ---
 
-### Task 6.2: OpenSSH Interop Tests
-- Scenarios:
-  - OpenSSH client → Erlang server
-  - Erlang client → OpenSSH server
-- Document failures
+### Task 6.2: Tier 2 — Fixture-Based Parsing Tests (always runs)
+- Ship OpenSSH test keys as fixtures in the repo:
+  - `ecdsa_sk1.pub`, `ed25519_sk1.pub` (from OpenSSH `regress/unittests/sshkey/testdata/`)
+  - These are already published under a permissive license
+- Test cases:
+  - Decode each key blob → verify field values (key type atom, application =
+    `<<"ssh:">>"`, EC point length = 65, Ed25519 key length = 32)
+  - Encode the decoded key → byte-for-byte match with original (round-trip)
+  - Parse an `authorized_keys` line containing an SK key → key is found
+  - Parse an `authorized_keys` file mixing SK and non-SK keys → all keys found
+  - Malformed SK key blob (truncated application) → decode fails gracefully
 
 **Done when**
-- At least one successful end-to-end auth
+- Round-trip encode/decode passes for both key types
+- `authorized_keys` parsing finds SK keys
+
+---
+
+### Task 6.3: Tier 3 — `sk-dummy.so` Integration Tests (optional, gated)
+
+OpenSSH ships `sk-dummy.so` — a software FIDO token used by their own CI
+(`regress/misc/sk-dummy/`).  It implements the `sk-api.h` interface without
+hardware, so `ssh-keygen` and `ssh` can generate keys and sign transparently.
+
+- Build or locate `sk-dummy.so`
+- Generate a test key: `ssh-keygen -t ecdsa-sk -w /path/to/sk-dummy.so`
+- Put the public key in an `authorized_keys` file
+- Start an OTP SSH daemon configured with SK algorithms enabled
+- Connect with OpenSSH client:
+  `ssh -o SecurityKeyProvider=/path/to/sk-dummy.so ...`
+- Assert authentication succeeds
+- Repeat for `ed25519-sk`
+- Gate on test config: skip with a clear message when `sk-dummy.so` is not
+  available (e.g., `{require, sk_dummy}` in CT config)
+
+**Done when**
+- At least one successful end-to-end auth (OpenSSH client → OTP server) using
+  `sk-dummy.so` for both `ecdsa-sk` and `ed25519-sk`
+- Test is skippable and CI passes when `sk-dummy.so` is absent
 
 ---
 
@@ -222,12 +271,103 @@ No tasks in this milestone will be implemented.
 
 ---
 
+## Milestone 8: Docker Image with `sk-dummy.so` (optional)
+
+This milestone is **optional** and independent of Milestones 1–7.  It provides
+a self-contained Docker image that includes OpenSSH built with `sk-dummy.so`,
+enabling fully reproducible Tier 3 integration tests without requiring the host
+to have OpenSSH source or FIDO libraries installed.
+
+### Background
+
+`sk-dummy.so` is a software FIDO token emulator that lives in OpenSSH's source
+tree (`regress/misc/sk-dummy/`).  It implements the `sk-api.h` middleware
+interface — the same pluggable C API that real FIDO libraries like `libfido2`
+use — but backs key enrollment and signing with in-process OpenSSL/Ed25519
+crypto instead of hardware.  OpenSSH's own CI uses it for all SK regression
+tests.
+
+`sk-dummy.so` is **not** distributed as a pre-built package by any Linux
+distribution.  It must be compiled from the OpenSSH source tree, and it depends
+on OpenSSH internal headers (`includes.h`, `crypto_api.h`, `sk-api.h`),
+OpenSSL, and OpenSSH's Ed25519 implementation.  The build system uses BSD make
+conventions, so building on Linux requires adaptation.  The `.so` is also
+version-coupled to the OpenSSH it was built against via a compile-time
+`SSH_SK_VERSION_MAJOR` check.
+
+### Task 8.1: Create Docker Build Script
+
+Extend the existing `ssh_compat_SUITE_data/build_scripts/` pattern to produce
+a Docker image that:
+
+- Starts from an existing `ssh_compat_suite-ssh:*` base (or builds OpenSSH
+  from source with `--enable-sk` and `libfido2-dev` installed)
+- Compiles `regress/misc/sk-dummy/sk-dummy.so` from the same OpenSSH source
+  tree used for the main build
+- Installs the `.so` at a well-known path inside the container
+  (e.g., `/buildroot/ssh/lib/sk-dummy.so`)
+- Configures `SecurityKeyProvider /buildroot/ssh/lib/sk-dummy.so` in the
+  container's `sshd_config` and `ssh_config`
+- Pre-generates `ecdsa-sk` and `ed25519-sk` host keys and user keys using
+  the built-in `sk-dummy.so` provider
+- Tags the image as `ssh_compat_suite-ssh-sk:<openssh_version>`
+
+Script location: `lib/ssh/test/ssh_compat_SUITE_data/build_scripts/create-sk-dummy-image`
+
+**Done when**
+- Script builds successfully and `docker run ... ssh -Q key` lists
+  `sk-ecdsa-sha2-nistp256@openssh.com` and `sk-ssh-ed25519@openssh.com`
+- `ssh-keygen -t ecdsa-sk` and `ssh-keygen -t ed25519-sk` work inside the
+  container without hardware
+
+---
+
+### Task 8.2: Verify End-to-End Inside Docker
+
+Manually verify (or script a smoke test) that the Docker image can:
+
+- Start an OpenSSH sshd with SK host keys
+- Use `ssh-keygen -t ecdsa-sk -w /buildroot/ssh/lib/sk-dummy.so` to generate
+  a client key pair
+- Connect from the container's OpenSSH client to an OTP SSH daemon on the host
+  (or vice versa) using the SK key for `publickey` authentication
+- Both `ecdsa-sk` and `ed25519-sk` key types authenticate successfully
+
+**Done when**
+- At least one round-trip authentication (OpenSSH client in Docker → OTP SSH
+  server on host) succeeds for each SK key type
+- The verification steps are documented so Tier 3 tests (Task 6.3) can
+  reference the image
+
+---
+
+### Task 8.3: Integrate with Tier 3 Tests
+
+Wire the Docker image into the Tier 3 test infrastructure from Task 6.3:
+
+- Detect the `ssh_compat_suite-ssh-sk:*` image via `docker images` (same
+  pattern as `ssh_compat_SUITE`)
+- If the image is present, start the container, generate SK keys with
+  `sk-dummy.so`, run the OTP daemon, connect with the containerized OpenSSH
+  client, and assert auth success
+- If the image is absent, skip with a clear message
+- Gate independently of any local `sk-dummy.so` — the Docker image is fully
+  self-contained
+
+**Done when**
+- Tier 3 tests pass when the Docker image is available
+- Tier 3 tests skip cleanly when the Docker image is absent
+- CI passes in both cases
+
+---
+
 ## Definition of Done
 
 - `*-sk` keys authenticate successfully
 - No regressions in existing SSH auth
 - Tests cover parsing, verification, and failure modes
 - Clear documentation of limitations and requirements
+- Test coverage for each modified module (`ssh_message`, `ssh_transport`, `ssh_auth`, `ssh_file`) is equal to or greater than the pre-change baseline
 
 ---
 

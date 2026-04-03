@@ -1,5 +1,12 @@
 # Match at any level.
 
+# nix
+/result
+/result-*
+
+# direnv
+.direnv
+
 # emacs
 *~
 lib/tools/emacs/*.elc
@@ -352,4 +359,3 @@ JAVADOC-GENERATED
 /lib/xmerl/src/xmerl_xsd_re_parse.erl
 /lib/xmerl/src/xmerl_xpath_parse.erl
 /lib/xmerl/test/xmerl_test.erl
-
