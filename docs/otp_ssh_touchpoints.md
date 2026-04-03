@@ -1,179 +1,397 @@
 # OTP SSH Touchpoints for FIDO Key Support
 
-This document identifies the key modules, functions, and code paths in Erlang/OTP's SSH implementation that need modification to support FIDO security keys (`ecdsa-sk`, `ed25519-sk`).
+This document identifies every function in Erlang/OTP's SSH implementation that
+must be extended to support FIDO security keys (`ecdsa-sk`, `ed25519-sk`).  All
+line numbers were verified by direct inspection of the source tree.
 
 ---
 
-## Overview
+## Ground Rules for All Changes
 
-The OTP SSH implementation is located in `lib/ssh/src/`. Key areas for FIDO support:
+Per project constraints, **no new exported functions are to be added**.  Every
+change is a new pattern-matched function head inserted into an existing function
+before any existing catch-all clause.  Private (non-exported) helpers may be
+added freely.
 
-1. **Key Type Recognition** - Where key type strings are parsed
-2. **Public Key Parsing** - Binary decoding of SSH wire format
-3. **Signature Verification** - Cryptographic verification of signatures
-4. **Authentication Flow** - Server-side publickey authentication
-5. **Key Callbacks** - User-provided key validation hooks
+---
+
+## Recommended Internal Key Term Representation
+
+SK keys have no OIDs.  Do **not** force them into the `{#'ECPoint'{},
+{namedCurve, OID}}` representation — that would pollute the OID machinery and
+cause false matches throughout `ssh_transport.erl`.
+
+Use plain tagged tuples:
+
+```erlang
+%% ECDSA-SK public key
+{ecdsa_sk, #'ECPoint'{point = Q}, secp256r1, Application :: binary()}
+
+%% Ed25519-SK public key
+{ed25519_sk, PublicKey :: binary(), Application :: binary()}
+```
+
+`Application` is the string from the wire format (typically `<<"ssh:">>`).  It
+is **mandatory** at verification time (needed for `SHA-256(application)`) and
+must be preserved through every encode/decode round-trip.
 
 ---
 
 ## Module: `ssh_message.erl`
 
-**Purpose**: Encodes and decodes SSH protocol messages, including public/private keys.
+### 1. `ssh2_pubkey_decode2/1`  —  L680–712
 
-### Key Functions
+**What it does**: Pattern-matches the raw wire-format binary and returns
+`{KeyTerm, RestBinary}`.
 
-#### `ssh2_pubkey_encode/1` (Lines 581-608)
-Encodes Erlang public key records to SSH wire format.
+**Current heads** (in order):
+- L680: `ssh-rsa`
+- L687: `ssh-dss`
+- L698: catch-all for any other `SshCurveName` — handles `ecdsa-sha2-*` and
+  `ssh-ed*` by delegating to `ssh_curvename2oid/1`
 
-**Current support:**
-- `#'RSAPublicKey'{}` → `"ssh-rsa"`
-- `{Y, #'Dss-Parms'{}}` → `"ssh-dss"`
-- `{#'ECPoint'{}, {namedCurve, OID}}` → `"ecdsa-sha2-nistp256"` etc.
-- Ed25519/Ed448 → `"ssh-ed25519"`, `"ssh-ed448"`
+**Required new heads** — insert BEFORE the catch-all at L698:
 
-**Required changes:**
-- Add clauses for FIDO key types with application string and flags
-
-#### `ssh2_pubkey_decode2/1` (Lines 611-650)
-Decodes SSH wire format to Erlang public key records.
-
-**Current parsing:**
 ```erlang
-ssh2_pubkey_decode2(<<?UINT32(7), "ssh-rsa", ...>>) -> ...
-ssh2_pubkey_decode2(<<?UINT32(7), "ssh-dss", ...>>) -> ...
-ssh2_pubkey_decode2(<<?DEC_BIN(SshCurveName,SCNL), Rest0/binary>>) -> ...
+%% ECDSA-SK
+ssh2_pubkey_decode2(<<?UINT32(34), "sk-ecdsa-sha2-nistp256@openssh.com",
+                      ?DEC_BIN(_Curve, _CL),
+                      ?DEC_BIN(Q, _QL),
+                      ?DEC_BIN(Application, _AL),
+                      Rest/binary>>) ->
+    {{ecdsa_sk, #'ECPoint'{point = Q}, secp256r1, Application}, Rest};
+
+%% Ed25519-SK
+ssh2_pubkey_decode2(<<?UINT32(26), "sk-ssh-ed25519@openssh.com",
+                      ?DEC_BIN(PubKey, _PL),
+                      ?DEC_BIN(Application, _AL),
+                      Rest/binary>>) ->
+    {{ed25519_sk, PubKey, Application}, Rest};
 ```
 
-**Required changes:**
-- Add pattern matching for `"sk-ecdsa-sha2-nistp256@openssh.com"` (51 bytes)
-- Add pattern matching for `"sk-ssh-ed25519@openssh.com"` (26 bytes)
-- Parse additional fields: application string, flags (optional), key_handle (optional)
-- Store FIDO-specific data in new record types or extended tuples
+Key points:
+- Both heads match on the exact byte-length of the key-type string (34 and 26
+  respectively) so they can never be reached by the existing catch-all.
+- `Application` is captured and stored — it is required for verification.
+- Optional `flags` and `key_handle` fields (private key format only) are not
+  present in public key blobs and should not be matched here.
+- These heads must precede L698 or the catch-all will consume them first and
+  crash in `ssh_curvename2oid/1`.
 
-**Entry point**: This is THE primary location for adding FIDO public key parsing.
+---
 
-#### `ssh_curvename2oid/1` and `oid2ssh_curvename/1` (Lines 774-790)
-Convert between SSH curve names and OIDs.
+### 2. `ssh2_pubkey_encode/1`  —  L649–673
 
-**Current mappings:**
-- `"ssh-ed25519"` ↔ `?'id-Ed25519'`
-- `"ecdsa-sha2-nistp256"` ↔ `?'secp256r1'`
+**What it does**: Encodes an Erlang key term back to SSH wire-format binary.
 
-**Required changes:**
-- Add mappings for `"sk-ecdsa-sha2-nistp256@openssh.com"` (could map to same OID + metadata)
-- Add mappings for `"sk-ssh-ed25519@openssh.com"`
+**Current heads** (in order): RSA (L649), DSS (L652), Ed25519/Ed448 ECPoint
+(L655), Ed25519/Ed448 ECPrivateKey (L660), ECPrivateKey catch (L666), ECPoint
+catch (L671).
 
-#### `encode_signature/3` (Lines 870+)
-Encodes signatures for transmission.
+**Required new heads** — insert before the RSA head so they match first:
 
-**Required changes:**
-- Add clauses for FIDO signature encoding (signature + flags + counter)
+```erlang
+%% ECDSA-SK
+ssh2_pubkey_encode({ecdsa_sk, #'ECPoint'{point = Q}, secp256r1, Application}) ->
+    CurveName = <<"nistp256">>,
+    <<?STRING(<<"sk-ecdsa-sha2-nistp256@openssh.com">>),
+      ?STRING(CurveName),
+      ?Estring(Q),
+      ?Estring(Application)>>;
+
+%% Ed25519-SK
+ssh2_pubkey_encode({ed25519_sk, PubKey, Application}) ->
+    <<?STRING(<<"sk-ssh-ed25519@openssh.com">>),
+      ?Estring(PubKey),
+      ?Estring(Application)>>;
+```
+
+---
+
+### 3. `ssh_curvename2oid/1` and `oid2ssh_curvename/1`  —  L841–856
+
+**No changes needed or wanted.**
+
+SK key names (`sk-ecdsa-sha2-nistp256@openssh.com`, `sk-ssh-ed25519@openssh.com`)
+do not correspond to OIDs.  Adding them here would cause incorrect behaviour in
+any caller that uses the returned OID for crypto operations.  The new
+`ssh2_pubkey_decode2` heads above bypass these functions entirely.
+
+---
+
+### 4. `encode_signature/3`  —  L944–946
+
+**What it does**: Encodes a host-key signature for KEX reply messages.
+
+FIDO keys are user authentication keys, not host keys.  They will not appear in
+KEX reply messages.  **No changes needed here.**
 
 ---
 
 ## Module: `ssh_transport.erl`
 
-**Purpose**: SSH transport layer, including key exchange and signature verification.
+### 5. `supported_algorithms(public_key)`  —  L231–243
 
-### Key Functions
+**What it does**: Returns the full list of public-key algorithms this OTP build
+supports, filtered by what OTP's `crypto` application actually provides.
 
-#### `verify/5` (Line 1581)
-Main entry point for signature verification.
+**Required change** — add SK algorithms to the list:
+
+```erlang
+supported_algorithms(public_key) ->
+    select_crypto_supported(
+      [
+       {'sk-ssh-ed25519@openssh.com',          [{public_keys,eddsa}, {curves,ed25519}]},
+       {'sk-ecdsa-sha2-nistp256@openssh.com',  [{public_keys,ecdsa}, {hashs,sha256}, {curves,secp256r1}]},
+       {'ssh-ed25519',          [{public_keys,eddsa}, {curves,ed25519}]},
+       %% ... existing entries unchanged ...
+      ]);
+```
+
+The crypto requirements for SK algorithms are identical to their non-SK
+counterparts (both rely on ECDSA/P-256 and Ed25519 already present in OTP).
+
+---
+
+### 6. `default_algorithms1(public_key)`  —  L197–202
+
+**What it does**: Returns the subset of supported algorithms that are enabled
+by default (i.e., not in the blacklist).
+
+**Required change** — SK algorithms should be in `supported_algorithms` but
+may initially be kept off the default list until verification is complete.
+Once Milestone 3 is done, add them:
+
+```erlang
+default_algorithms1(public_key) ->
+    supported_algorithms(public_key, [
+        'ssh-rsa',
+        'ssh-dss'
+        %% sk algorithms are enabled by default once verified
+    ]);
+```
+
+---
+
+### 7. `sha/1`  —  L2293–2327
+
+**What it does**: Maps an algorithm atom to the hash algorithm used for signing.
+
+**Required new heads** — insert before the catch-all `sha(Str)` at L2327:
+
+```erlang
+sha('sk-ecdsa-sha2-nistp256@openssh.com') -> sha256;
+sha('sk-ssh-ed25519@openssh.com')         -> undefined; % Ed25519 is prehashed
+```
+
+These match the same hash choices as their non-SK equivalents:
+`ecdsa-sha2-nistp256` → `sha256`, `ssh-ed25519` → `undefined`.
+
+---
+
+### 8. `valid_key_sha_alg/3`  —  L2255–2276
+
+**What it does**: Asserts that a given key term is compatible with a given
+algorithm atom.  Called by `ssh_file:decode_ssh_file/4` (L1176) and
+`ssh_auth:get_public_key/2` (L154) to validate keys before use.
+
+**Required new heads** — insert before the catch-all `valid_key_sha_alg(_, _, _) -> false` at L2276:
+
+```erlang
+valid_key_sha_alg(public,  {ecdsa_sk, #'ECPoint'{}, secp256r1, _App},
+                  'sk-ecdsa-sha2-nistp256@openssh.com') -> true;
+valid_key_sha_alg(public,  {ed25519_sk, _Key, _App},
+                  'sk-ssh-ed25519@openssh.com')         -> true;
+```
+
+No `private` heads are needed: SK private keys live on hardware and are never
+represented as OTP terms.
+
+---
+
+### 9. `public_algo/1`  —  L2288–2292
+
+**What it does**: Returns the algorithm atom for a public key term.  Used by
+`ssh_file:is_auth_key/3` (L320) to build the key-type string for
+`authorized_keys` lookup.
+
+**Required new heads** — insert before the existing heads:
+
+```erlang
+public_algo({ecdsa_sk, #'ECPoint'{}, secp256r1, _App}) ->
+    'sk-ecdsa-sha2-nistp256@openssh.com';
+public_algo({ed25519_sk, _Key, _App}) ->
+    'sk-ssh-ed25519@openssh.com';
+```
+
+---
+
+### 10. `verify/5`  —  L1703–1704
 
 ```erlang
 verify(PlainText, Alg, Sig, Key, Ssh) ->
     do_verify(PlainText, sha(Alg), Sig, Key, Ssh).
 ```
 
-**Required changes:**
-- Add algorithm atom for FIDO key types (e.g., `'sk-ecdsa-sha2-nistp256@openssh.com'`)
-- Route to FIDO-specific verification function
+**No change needed here.**  `sha/1` will return the right hash for SK algs
+once item 7 above is in place, and `do_verify/5` handles the rest.
 
-#### `do_verify/5` (Lines 1587-1616)
-Algorithm-specific signature verification.
+---
 
-**Current clauses:**
-- DSA signatures: Decode R/S components, call `public_key:verify/4`
-- ECDSA signatures: Decode R/S, DER-encode, call `public_key:verify/4`
-- RSA signatures: Direct call to `public_key:verify/4`
-- Ed25519/Ed448: Direct call to `public_key:verify/4`
+### 11. `do_verify/5`  —  L1707–1734
 
-**Required changes:**
-- Add new clause for FIDO keys:
-  1. Parse signature structure (extract flags, counter, inner signature)
-  2. Reconstruct the 69-byte authenticator data blob:
-     - SHA-256(application) || flags || counter || SHA-256(PlainText)
-  3. Verify inner signature against this blob using standard crypto
-  4. Optionally check flags (user presence, user verification)
+**What it does**: Algorithm-specific cryptographic verification.  Receives
+`PlainText` (the SSH auth message `M`), `HashAlg`, raw `Sig` bytes, the decoded
+public key term, and the SSH connection state.
 
-**Critical**: This is where FIDO signature verification logic goes.
+**The FIDO verification problem**: For SK keys the `Sig` bytes arriving here
+are NOT a direct EC/Ed signature over `PlainText`.  The authenticator signed a
+different 69-byte blob:
 
-#### `verify_host_key/4` (Lines 988-1000)
-Verifies host keys (client-side).
-
-**Current logic:**
-- Check algorithm name matches
-- Call `verify/5`
-- Check against known_hosts
-
-**Required changes:**
-- Should work with FIDO keys once `verify/5` is updated
-- May need algorithm name normalization
-
-#### `sha/1` (Referenced in verify/5)
-Maps algorithm atoms to hash algorithms.
-
-**Required changes:**
-- Add mappings:
-  - `'sk-ecdsa-sha2-nistp256@openssh.com'` → `sha256`
-  - `'sk-ssh-ed25519@openssh.com'` → undefined (Ed25519 is prehashed)
-
-#### `default_algorithms1/1` (Line 195)
-Defines supported algorithm lists.
-
-**Current:**
-```erlang
-default_algorithms1(public_key) ->
-    supported_algorithms(public_key, [
-        'ssh-rsa',
-        'ssh-dss'
-    ]);
+```
+SHA-256(application) || flags_byte || counter_uint32_be || SHA-256(M)
 ```
 
-**Required changes:**
-- Add `'sk-ecdsa-sha2-nistp256@openssh.com'`
-- Add `'sk-ssh-ed25519@openssh.com'`
-- Consider making them opt-in initially
+Additionally, `Sig` as received contains the inner signature blob **plus**
+the flags byte and counter uint32 appended after it (see sig parsing note in
+`verify_sig/7` below).
+
+**Required new heads** — insert before the existing DSS head at L1707:
+
+```erlang
+%% ECDSA-SK: Sig = <<ecdsa_sig_blob/binary, Flags:8, Counter:32>>
+do_verify(PlainText, sha256, Sig,
+          {ecdsa_sk, #'ECPoint'{} = Point, secp256r1, Application}, _Ssh) ->
+    try
+        InnerSigLen = byte_size(Sig) - 5,   % subtract 1 (flags) + 4 (counter)
+        <<EcdsaSigBlob:InnerSigLen/binary, Flags:8, Counter:32>> = Sig,
+        AuthData = fido_authenticator_data(Application, Flags, Counter, PlainText),
+        <<?UINT32(Rlen), R:Rlen/big-signed-integer-unit:8,
+          ?UINT32(Slen), S:Slen/big-signed-integer-unit:8>> = EcdsaSigBlob,
+        DerSig = public_key:der_encode('ECDSA-Sig-Value',
+                                       #'ECDSA-Sig-Value'{r=R, s=S}),
+        public_key:verify(AuthData, sha256, DerSig,
+                          {Point, {namedCurve, ?'secp256r1'}})
+    catch
+        _:_ -> false
+    end;
+
+%% Ed25519-SK: Sig = <<ed25519_sig:64/binary, Flags:8, Counter:32>>
+do_verify(PlainText, undefined, Sig,
+          {ed25519_sk, PubKey, Application}, _Ssh) ->
+    try
+        <<Ed25519Sig:64/binary, Flags:8, Counter:32>> = Sig,
+        AuthData = fido_authenticator_data(Application, Flags, Counter, PlainText),
+        public_key:verify(AuthData, none,
+                          Ed25519Sig,
+                          {#'ECPoint'{point=PubKey}, {namedCurve, ?'id-Ed25519'}})
+    catch
+        _:_ -> false
+    end;
+```
+
+With the private helper:
+
+```erlang
+%% Reconstruct the 69-byte blob that the FIDO authenticator signed.
+%% See docs/fido_ssh_notes.md for byte-level detail.
+fido_authenticator_data(Application, Flags, Counter, SshMessage) ->
+    AppHash = crypto:hash(sha256, Application),
+    MsgHash = crypto:hash(sha256, SshMessage),
+    <<AppHash:32/binary, Flags:8, Counter:32, MsgHash:32/binary>>.
+```
+
+No extensions are defined for SSH use, so the extensions field is always empty
+and the blob is always exactly 69 bytes.
+
+---
+
+### 12. `sign/4` and `sign/3`  —  L1671–1695
+
+FIDO signing requires hardware and is out of scope until Milestone 5.
+**No changes needed now.**
 
 ---
 
 ## Module: `ssh_auth.erl`
 
-**Purpose**: User authentication (both client and server sides).
+### 13. `key_alg/1`  —  L594–596
 
-### Key Functions
+**What it does**: Maps a signature algorithm atom to its corresponding key
+algorithm atom.  This exists to handle RSA variants (`rsa-sha2-256` → `ssh-rsa`,
+`rsa-sha2-512` → `ssh-rsa`).  Called by `get_public_key/2` (L146).
 
-#### `handle_userauth_request/3` (Lines 233-350+)
-Handles SSH_MSG_USERAUTH_REQUEST messages on the server.
+**Required new heads** — insert before the existing heads:
 
-**Publickey auth flow:**
+```erlang
+key_alg('sk-ecdsa-sha2-nistp256@openssh.com') -> 'sk-ecdsa-sha2-nistp256@openssh.com';
+key_alg('sk-ssh-ed25519@openssh.com')         -> 'sk-ssh-ed25519@openssh.com';
+```
 
-1. **Pre-verification request** (Lines 301-330):
-   - Client sends: `?FALSE, algorithm, key_blob`
-   - Server calls `pre_verify_sig/3` → checks if key is authorized
-   - Server responds with `SSH_MSG_USERAUTH_PK_OK`
+For SK algorithms the signature algorithm and key algorithm are the same atom
+(there are no SK signing variants like there are for RSA).
 
-2. **Actual authentication** (Lines 332-360):
-   - Client sends: `?TRUE, algorithm, key_blob, signature`
-   - Server calls `verify_sig/7` → validates signature
-   - Server responds with `SUCCESS` or `FAILURE`
+---
 
-**Required changes:**
-- None directly needed here if lower-level functions handle FIDO keys
-- May want to check FIDO-specific flags or expose "user presence required" errors
+### 14. `verify_sig/7`  —  L563–579
 
-#### `pre_verify_sig/3` (Lines 557-565)
-Checks if a public key is authorized for a user (before signature check).
+**What it does**: Orchestrates signature verification on the server.  Calls
+`ssh_message:ssh2_pubkey_decode/1`, checks preferred algorithms, builds the
+SSH auth message, then parses the raw sig blob and calls
+`ssh_transport:verify/5`.
+
+**The parsing problem**: The current sig parsing at L573–577:
+
+```erlang
+<<?UINT32(AlgSigLen), AlgSig:AlgSigLen/binary>> = SigWLen,
+<<?UINT32(AlgLen), _Alg:AlgLen/binary,
+  ?UINT32(SigLen), Sig:SigLen/binary>> = AlgSig,
+ssh_transport:verify(PlainText, list_to_existing_atom(Alg), Sig, Key, Ssh)
+```
+
+requires `AlgSig` to be **exactly** `4 + AlgLen + 4 + SigLen` bytes.  For SK
+signatures `AlgSig` has 5 trailing bytes after the inner string (`Flags:8,
+Counter:32`), so the binary pattern match raises `badmatch`, which the
+surrounding `try/catch` silently turns into `false`.
+
+**Fix**: Add a new `verify_sig/7` function head pattern-matched on the SK
+algorithm binary, placed before the existing clause, that allows trailing bytes:
+
+```erlang
+verify_sig(SessionId, User, Service, BAlg, KeyBlob, SigWLen,
+           #ssh{opts=Opts} = Ssh)
+  when BAlg =:= <<"sk-ecdsa-sha2-nistp256@openssh.com">>;
+       BAlg =:= <<"sk-ssh-ed25519@openssh.com">> ->
+    try
+        Alg = binary_to_list(BAlg),
+        true = lists:member(list_to_existing_atom(Alg),
+                            proplists:get_value(public_key,
+                                                ?GET_OPT(preferred_algorithms,Opts))),
+        Key = ssh_message:ssh2_pubkey_decode(KeyBlob),
+        true = ssh_transport:call_KeyCb(is_auth_key, [Key, User], Opts),
+        PlainText = build_sig_data(SessionId, User, Service, KeyBlob, Alg),
+        <<?UINT32(AlgSigLen), AlgSig:AlgSigLen/binary>> = SigWLen,
+        %% SK sigs: alg_name || inner_sig_string || flags_byte || counter_u32
+        %% Allow trailing bytes by matching the inner string then capturing remainder
+        <<?UINT32(AlgLen), _Alg:AlgLen/binary,
+          ?UINT32(SigLen), InnerSig:SigLen/binary,
+          FlagsAndCounter/binary>> = AlgSig,
+        Sig = <<InnerSig/binary, FlagsAndCounter/binary>>,
+        ssh_transport:verify(PlainText, list_to_existing_atom(Alg), Sig, Key, Ssh)
+    catch
+        _:_ -> false
+    end;
+verify_sig(SessionId, User, Service, AlgBin, KeyBlob, SigWLen, Ssh) ->
+    %% existing clause unchanged
+    ...
+```
+
+`Sig` passed to `do_verify/5` is therefore `InnerSig ++ FlagsAndCounter`,
+matching what the new `do_verify` heads in item 11 expect.
+
+---
+
+### 15. `pre_verify_sig/3`  —  L554–561
 
 ```erlang
 pre_verify_sig(User, KeyBlob, #ssh{opts=Opts}) ->
@@ -185,343 +403,252 @@ pre_verify_sig(User, KeyBlob, #ssh{opts=Opts}) ->
     end.
 ```
 
-**Required changes:**
-- Will automatically work once `ssh2_pubkey_decode/1` handles FIDO keys
-- Key callback receives parsed key (including FIDO metadata)
+**No change needed.**  Once `ssh2_pubkey_decode/1` handles SK key blobs this
+function works automatically.  The SK key term (with application string) is
+passed directly to `is_auth_key`, giving the key callback access to all FIDO
+metadata.
 
-#### `verify_sig/7` (Lines 567-579)
-Verifies the signature during actual authentication.
+---
 
-```erlang
-verify_sig(SessionId, User, Service, AlgBin, KeyBlob, SigWLen, #ssh{opts=Opts} = Ssh) ->
-    try
-        Alg = binary_to_list(AlgBin),
-        true = lists:member(list_to_existing_atom(Alg), 
-                            proplists:get_value(public_key, ...)),
-        Key = ssh_message:ssh2_pubkey_decode(KeyBlob),
-        true = ssh_transport:call_KeyCb(is_auth_key, [Key, User], Opts),
-        PlainText = build_sig_data(SessionId, User, Service, KeyBlob, Alg),
-        <<?UINT32(AlgSigLen), AlgSig:AlgSigLen/binary>> = SigWLen,
-        <<?UINT32(AlgLen), _Alg:AlgLen/binary,
-          ?UINT32(SigLen), Sig:SigLen/binary>> = AlgSig,
-        ssh_transport:verify(PlainText, list_to_existing_atom(Alg), Sig, Key, Ssh)
-    catch
-        _:_ -> false
-    end.
-```
+### 16. `build_sig_data/5`  —  L581–590
 
-**Required changes:**
-- May need to parse FIDO signature differently (has flags + counter after signature)
-- Current code expects: `algorithm_name || signature`
-- FIDO format: `algorithm_name || signature || flags || counter`
-- **Option 1**: Parse here and pass components separately to `verify/5`
-- **Option 2**: Pass entire blob to `verify/5` and parse there (cleaner)
+**No change needed.**  This constructs the SSH authentication message `M` — the
+plain-text that FIDO's `SHA-256(M)` is computed over.  Its output is correct
+as-is.
 
-#### `build_sig_data/5` (Lines 581-592)
-Builds the SSH authentication message that was signed.
+---
 
-**Current:**
-```erlang
-Sig = [?binary(SessionId),
-       ?SSH_MSG_USERAUTH_REQUEST,
-       ?string_utf8(User),
-       ?string(Service),
-       ?binary(<<"publickey">>),
-       ?TRUE,
-       ?string(Alg),
-       ?binary(KeyBlob)],
-```
+### 17. `handle_userauth_request/3`  —  L293–323 and L325–352
 
-**Required changes:**
-- None needed here
-- This message is hashed and included in the FIDO authenticator data
-- The FIDO signature is over a *different* blob (see docs/fido_ssh_notes.md)
-
-#### `key_alg/1` (Lines 589-591)
-Normalizes algorithm names (e.g., RSA signature variants).
-
-**Required changes:**
-- May need to normalize FIDO algorithm names if short forms are used
+**No change needed.**  The two `publickey` clauses (pre-verify at L293 and
+actual-auth at L325) both delegate fully to `pre_verify_sig` and `verify_sig`
+respectively.  Once those work for SK keys, these clauses work automatically.
 
 ---
 
 ## Module: `ssh_file.erl`
 
-**Purpose**: Reads/writes SSH key files (authorized_keys, known_hosts, identity files).
+### 18. `decode(Bin, auth_keys)`  —  L572–604
 
-### Key Functions
+**What it does**: Parses lines from an `authorized_keys` file.  Uses
+`binary:match/2` to locate the start of the key type field on each line, then
+calls `ssh_message:ssh2_pubkey_decode/1` on the base64-decoded key blob.
 
-#### `decode/2` (Lines 490-550+)
-Decodes various key file formats.
+**Current key type prefix list** (L591–597):
 
-**Relevant for:**
-- `authorized_keys` format: `decode(KeyBin, auth_keys)`
-- `known_hosts` format: `decode(KeyBin, known_hosts)`
-- OpenSSH public key: `decode(KeyBin, openssh_key)`
-
-**Current key type detection** (Line 581):
 ```erlang
 case binary:match(L, [<<"ssh-rsa">>,
                       <<"rsa-sha2-">>,
                       <<"ssh-dss">>,
                       <<"ecdsa-sha2-nistp">>,
-                      <<"ssh-ed">>]) of
+                      <<"ssh-ed">>
+                     ]) of
 ```
 
-**Required changes:**
-- Add `<<"sk-ecdsa-sha2-">>` to pattern list
-- Add `<<"sk-ssh-ed">>` to pattern list
-- Ensure base64 decoding works for longer FIDO key blobs
+**Required change** — add SK prefixes to the list:
 
-#### `file_base_name/2` (Lines 1247-1282)
-Maps key types to file names.
+```erlang
+case binary:match(L, [<<"ssh-rsa">>,
+                      <<"rsa-sha2-">>,
+                      <<"ssh-dss">>,
+                      <<"ecdsa-sha2-nistp">>,
+                      <<"ssh-ed">>,
+                      <<"sk-ecdsa-sha2-">>,   %% NEW
+                      <<"sk-ssh-ed25519">>     %% NEW
+                     ]) of
+```
 
-**Required changes:**
-- Add mappings for FIDO key types:
-  - `'sk-ecdsa-sha2-nistp256@openssh.com'` → `"id_ecdsa_sk"` (user) / `"ssh_host_ecdsa_sk_key"` (system)
-  - `'sk-ssh-ed25519@openssh.com'` → `"id_ed25519_sk"` (user) / `"ssh_host_ed25519_sk_key"` (system)
+Without this change SK key lines match `nomatch` and are silently dropped, so
+`is_auth_key/3` always returns `false` regardless of what `ssh2_pubkey_decode`
+does.
 
 ---
 
-## Module: `ssh_options.erl`
+### 19. `is_auth_key/3`  —  L318–326
 
-**Purpose**: Handles SSH configuration options and algorithm preferences.
+```erlang
+is_auth_key(Key0, User, Opts) ->
+    Dir = ssh_dir({remoteuser,User}, Opts),
+    ok = assure_file_mode(Dir, user_read),
+    KeyType = normalize_alg(
+                erlang:atom_to_binary(ssh_transport:public_algo(Key0), latin1)),
+    Key = encode_key(Key0),
+    lookup_auth_keys(KeyType, Key, ...)
+```
 
-### Key Functions
-
-#### Algorithm preference handling (Line 959)
-Validates and processes preferred algorithm lists.
-
-**Required changes:**
-- Add FIDO key types to validation
-- Allow atoms like `'sk-ecdsa-sha2-nistp256@openssh.com'` or binary strings
+**No direct change needed**, but depends on:
+- `ssh_transport:public_algo/1` handling SK key terms (item 9)
+- `ssh_message:ssh2_pubkey_encode/1` handling SK key terms (item 2), called
+  via `encode_key/1` at L845
 
 ---
 
-## Module: `ssh_client_key_api.erl` and `ssh_server_key_api.erl`
+### 20. `extract_public_key/1`  —  L708–734
 
-**Purpose**: Behavior definitions for key callbacks.
+**What it does**: Extracts a public key term from a private key term.  Called
+by `ssh_auth:get_public_key/2` (L155) on the client side.
 
-### Key Callbacks
+**Current heads**: RSA (L708), DSA (L710), Ed25519/Ed448 ECPrivateKey (L712),
+ECDSA ECPrivateKey (L725), engine key (L728).
 
-#### `is_auth_key/3` (server-side)
-Called by server to check if a public key is authorized for a user.
+For SK keys the "private key" loaded by `user_key/2` would be whatever the key
+callback returns — likely a map or tuple containing the key handle, application
+string, and public key material.
 
-**Signature:**
+**Required new head** — shape depends on what `user_key` returns for SK keys
+(to be determined when implementing Milestone 5).  At minimum the public
+portion must be extracted as an SK key term:
+
 ```erlang
-is_auth_key(Key :: public_key:public_key(), User :: string(), Options) -> boolean()
+%% SK key: the private side is hardware; "private" file contains public key + handle
+extract_public_key({ecdsa_sk, #'ECPoint'{} = Point, Curve, App, _KeyHandle}) ->
+    {ecdsa_sk, Point, Curve, App};
+extract_public_key({ed25519_sk, PubKey, App, _KeyHandle}) ->
+    {ed25519_sk, PubKey, App};
 ```
-
-**Required changes:**
-- None to the behavior definition
-- Implementations (like `ssh_file`) need to handle FIDO key records
-- FIDO keys will include additional metadata (application, flags)
-
-#### `user_key/2` (client-side)
-Called by client to get private key for authentication.
-
-**Required changes:**
-- FIDO keys cannot be loaded from disk (no private key stored)
-- Would need new callback or behavior for hardware interaction
-- Initially: just support verification (server-side only)
 
 ---
 
-## Data Structures and Records
+### 21. `file_base_name/2`  —  L1249–1269
 
-### Existing Records (from ssh.hrl, ssh_auth.hrl)
+**What it does**: Maps `{role, algorithm_atom}` to the base filename for that
+key type.
+
+**Required new heads** — insert before the system catch-all at L1269:
 
 ```erlang
-#ssh{} - Main SSH connection state
-#alg{} - Algorithm configuration
-#ssh_msg_userauth_request{} - Authentication request message
+file_base_name(user,   'sk-ecdsa-sha2-nistp256@openssh.com') -> "id_ecdsa_sk";
+file_base_name(user,   'sk-ssh-ed25519@openssh.com'        ) -> "id_ed25519_sk";
+file_base_name(system, 'sk-ecdsa-sha2-nistp256@openssh.com') -> "ssh_host_ecdsa_sk_key";
+file_base_name(system, 'sk-ssh-ed25519@openssh.com'        ) -> "ssh_host_ed25519_sk_key";
 ```
 
-### New Records Needed
-
-**Option 1: Extend existing key tuples**
-```erlang
-% ECDSA-SK
-{{#'ECPoint'{point = Q}, {namedCurve, OID}}, 
- [{application, <<"ssh:">>}, 
-  {flags, undefined}, 
-  {key_handle, undefined}]}
-
-% Ed25519-SK  
-{{#'ECPoint'{point = PubKey}, {namedCurve, ?'id-Ed25519'}},
- [{application, <<"ssh:">>}]}
-```
-
-**Option 2: New record types**
-```erlang
--record(ssh_sk_ecdsa_key, {
-    ec_point :: #'ECPoint'{},
-    curve_oid :: tuple(),
-    application :: binary(),
-    flags :: undefined | integer(),
-    key_handle :: undefined | binary()
-}).
-
--record(ssh_sk_ed25519_key, {
-    public_key :: binary(),
-    application :: binary(),
-    flags :: undefined | integer(),
-    key_handle :: undefined | binary()
-}).
-```
-
-**Recommendation**: Start with Option 1 (extended tuples) for minimal disruption.
+These match the filenames OpenSSH uses (`id_ecdsa_sk`, `id_ed25519_sk`).
 
 ---
 
-## Call Graph: Publickey Authentication (Server-Side)
+### 22. Atom table seeding
+
+`verify_sig/7` calls `list_to_existing_atom(Alg)` where `Alg` is a string from
+the wire.  The atoms `'sk-ecdsa-sha2-nistp256@openssh.com'` and
+`'sk-ssh-ed25519@openssh.com'` must exist in the atom table before this call or
+it throws `badarg`.
+
+The function heads added to `sha/1`, `key_alg/1`, and `valid_key_sha_alg/3`
+above cause the compiler to intern those atoms at load time, which is sufficient.
+No additional seeding mechanism is needed.
+
+---
+
+## Call Graphs
+
+### Server-Side Publickey Authentication (full path)
 
 ```
 ssh_fsm_userauth_server:handle_event/4
   └─> ssh_auth:handle_userauth_request/3
        │
-       ├─> [Pre-verification phase]
-       │    └─> ssh_auth:pre_verify_sig/3
-       │         └─> ssh_message:ssh2_pubkey_decode/1  ← NEEDS FIDO SUPPORT
-       │              └─> ssh_transport:call_KeyCb(is_auth_key, ...)
+       ├─> [PRE-VERIFY — client sends ?FALSE probe]          L293
+       │    └─> ssh_auth:pre_verify_sig/3                    L554
+       │         ├─> ssh_message:ssh2_pubkey_decode/1        L676  ← (A)
+       │         │    └─> ssh_message:ssh2_pubkey_decode2/1  L680  ← NEW HEAD
+       │         └─> KeyCb:is_auth_key/3
+       │              └─> ssh_file:is_auth_key/3             L318
+       │                   ├─> ssh_transport:public_algo/1   L2288 ← NEW HEAD
+       │                   └─> ssh_message:ssh2_pubkey_encode/1 L649 ← NEW HEAD
        │
-       └─> [Actual authentication phase]
-            └─> ssh_auth:verify_sig/7
-                 ├─> ssh_message:ssh2_pubkey_decode/1  ← NEEDS FIDO SUPPORT
-                 ├─> ssh_auth:build_sig_data/5
-                 └─> ssh_transport:verify/5             ← NEEDS FIDO SUPPORT
-                      └─> ssh_transport:do_verify/5     ← ADD FIDO CLAUSE
-                           └─> public_key:verify/4      (standard crypto)
+       └─> [ACTUAL AUTH — client sends ?TRUE + sig]          L325
+            └─> ssh_auth:verify_sig/7                        L563  ← NEW HEAD
+                 ├─> list_to_existing_atom(Alg)                    ← atoms seeded
+                 ├─> ssh_message:ssh2_pubkey_decode/1        L676  ← (A)
+                 ├─> KeyCb:is_auth_key/3
+                 ├─> ssh_auth:build_sig_data/5               L581  (no change)
+                 └─> ssh_transport:verify/5                  L1703
+                      └─> ssh_transport:do_verify/5          L1707 ← NEW HEAD
+                           ├─> fido_authenticator_data/4           (new private helper)
+                           │    └─> crypto:hash(sha256, ...)
+                           └─> public_key:verify/4                 (standard OTP)
+```
+
+### `authorized_keys` Parsing Path
+
+```
+ssh_file:decode/2 (auth_keys)                               L572
+  ├─> binary:match(L, KeyTypePrefixes)                      L591  ← ADD sk- PREFIXES
+  └─> ssh_message:ssh2_pubkey_decode/1                      L676  ← (A)
+       └─> ssh_message:ssh2_pubkey_decode2/1                L680  ← NEW HEAD
+```
+
+### Key File Loading Path (Client Side)
+
+```
+ssh_auth:get_public_key/2                                   L145
+  ├─> ssh_auth:key_alg/1                                    L594  ← NEW HEAD
+  ├─> KeyCb:user_key/2
+  │    └─> ssh_file:user_key/2                              L359
+  │         └─> ssh_file:read_ssh_key_file/4                L1121
+  │              └─> ssh_file:file_base_name/2              L1249 ← NEW HEAD
+  ├─> ssh_transport:valid_key_sha_alg/3                     L2255 ← NEW HEAD
+  ├─> ssh_file:extract_public_key/1                         L708  ← NEW HEAD
+  └─> ssh_message:ssh2_pubkey_encode/1                      L649  ← NEW HEAD
 ```
 
 ---
 
-## Call Graph: Key File Parsing
+## Complete Change Inventory
 
-```
-ssh_file:decode/2
-  └─> [various format handlers]
-       └─> ssh_message:ssh2_pubkey_decode/1  ← NEEDS FIDO SUPPORT
-            └─> ssh_message:ssh2_pubkey_decode2/1
-```
+| # | Module              | Function                  | Lines      | Change        |
+|---|---------------------|---------------------------|------------|---------------|
+| 1 | `ssh_message.erl`   | `ssh2_pubkey_decode2/1`   | L698       | 2 new heads before catch-all |
+| 2 | `ssh_message.erl`   | `ssh2_pubkey_encode/1`    | L649       | 2 new heads   |
+| 3 | `ssh_transport.erl` | `supported_algorithms/1`  | L231       | 2 new entries |
+| 4 | `ssh_transport.erl` | `default_algorithms1/1`   | L197       | 2 new entries (Milestone 4) |
+| 5 | `ssh_transport.erl` | `sha/1`                   | L2327      | 2 new heads before catch-all |
+| 6 | `ssh_transport.erl` | `valid_key_sha_alg/3`     | L2276      | 2 new heads before false catch-all |
+| 7 | `ssh_transport.erl` | `public_algo/1`           | L2288      | 2 new heads   |
+| 8 | `ssh_transport.erl` | `do_verify/5`             | L1707      | 2 new heads + private `fido_authenticator_data/4` |
+| 9 | `ssh_auth.erl`      | `key_alg/1`               | L594       | 2 new heads   |
+|10 | `ssh_auth.erl`      | `verify_sig/7`            | L563       | 1 new head (SK variant with trailing-byte parsing) |
+|11 | `ssh_file.erl`      | `decode/2` (auth_keys)    | L591       | 2 new binary match patterns |
+|12 | `ssh_file.erl`      | `extract_public_key/1`    | L708       | 2 new heads   |
+|13 | `ssh_file.erl`      | `file_base_name/2`        | L1249      | 4 new heads   |
 
----
-
-## Implementation Strategy
-
-### Phase 1: Recognition Only (No Crash)
-1. Add FIDO key type strings to `ssh_message:ssh2_pubkey_decode2/1`
-2. Parse basic structure but ignore FIDO-specific fields
-3. Return standard key records (treat as regular ECDSA/Ed25519)
-4. **Goal**: System doesn't crash when encountering FIDO keys
-
-### Phase 2: Full Parsing
-1. Parse application string, flags, key_handle from public keys
-2. Store in extended record/tuple format
-3. Preserve data through encode/decode round-trips
-4. Update `ssh_file.erl` to recognize FIDO keys in files
-5. **Goal**: FIDO keys can be loaded from authorized_keys
-
-### Phase 3: Signature Verification
-1. Add FIDO signature parsing in `ssh_auth:verify_sig/7` or `ssh_transport:do_verify/5`
-2. Implement 69-byte authenticator data reconstruction
-3. Add SHA-256 hashing of application string and message
-4. Call standard ECDSA/Ed25519 verification on modified blob
-5. **Goal**: FIDO signatures can be verified (no hardware needed)
-
-### Phase 4: Algorithm Registration
-1. Add FIDO algorithms to `ssh_transport:default_algorithms1/1`
-2. Update `ssh_options.erl` validation
-3. Add file name mappings in `ssh_file.erl`
-4. **Goal**: FIDO keys work in standard SSH flows
-
-### Phase 5: Hardware Support (Future)
-1. Define authenticator behavior/callback
-2. Implement key generation support
-3. Implement signing support (requires hardware interaction)
-4. **Goal**: Full client-side FIDO support
+Functions that need **no changes** because they delegate entirely to the above:
+- `ssh_transport:verify/5` (L1703)
+- `ssh_auth:pre_verify_sig/3` (L554)
+- `ssh_auth:handle_userauth_request/3` (L293, L325)
+- `ssh_auth:build_sig_data/5` (L581)
+- `ssh_file:is_auth_key/3` (L318)
 
 ---
 
-## Testing Touchpoints
+## Implementation Order
 
-### Unit Tests
-- `ssh_message_SUITE.erl` - Key encoding/decoding
-- `ssh_auth_SUITE.erl` - Authentication flows
+Work can proceed strictly milestone by milestone.  Within each milestone the
+changes are independent enough to compile and test incrementally.
 
-### Integration Tests  
-- `ssh_basic_SUITE.erl` - Basic SSH operations
-- `ssh_protocol_SUITE.erl` - Protocol compliance
+**Milestone 2 (Parsing)**
+- Items 1, 2 — `ssh2_pubkey_decode2` and `ssh2_pubkey_encode`
+- Item 11 — `decode(auth_keys)` prefix patterns
+- Item 13 — `file_base_name`
+- Verify: round-trip encode/decode of both key types
 
-### Test Data Needed
-- Sample FIDO public keys (ECDSA-SK, Ed25519-SK)
-- Sample FIDO signatures with flags and counter
-- OpenSSH-generated test vectors
+**Milestone 3 (Verification)**
+- Items 3, 5, 6, 7 — algorithm registration and key validation
+- Item 8 — `do_verify` + `fido_authenticator_data`
+- Item 9, 10 — `key_alg` and `verify_sig` SK head
+- Verify: signature verification against OpenSSH test vectors
 
----
+**Milestone 4 (Auth Flow)**
+- Item 4 — `default_algorithms1` enable SK by default
+- Item 12 — `extract_public_key` (client path)
+- Verify: full server-side auth against OpenSSH client
 
-## External Dependencies
-
-### Required Modules
-- `public_key` - Already used for standard verification
-- `crypto` - SHA-256 hashing (already available)
-
-### No New Dependencies Needed
-- FIDO verification uses standard ECDSA/Ed25519
-- No libfido2 or hardware interaction required for verification
-- Signing (client-side) would need hardware, but that's Phase 5
+**Milestone 5 (Hardware / Client)**
+- `sign/3,4` in `ssh_transport.erl` — hardware signing
+- `user_key/2` in `ssh_file.erl` / key callback — load SK keys
 
 ---
 
-## Files Requiring Modification
-
-### Critical Path (Minimum Viable Implementation)
-1. **`ssh_message.erl`** - Add FIDO key parsing (most important)
-2. **`ssh_transport.erl`** - Add FIDO signature verification
-3. **`ssh_file.erl`** - Recognize FIDO keys in key files
-
-### Supporting Changes
-4. **`ssh_options.erl`** - Algorithm validation
-5. **`ssh_transport.hrl`** or **`ssh.hrl`** - Add macros/constants for FIDO
-
-### Optional/Future
-6. **`ssh_client_key_api.erl`** - New callback for hardware interaction
-7. **Test suites** - Add FIDO-specific tests
-
----
-
-## Key Insights
-
-### What's Easy
-- **Signature verification**: No hardware needed, just different blob format
-- **Public key parsing**: Additive changes to existing decoder
-- **Server-side support**: Can be done without client changes
-
-### What's Hard
-- **Client-side signing**: Requires hardware interaction (libfido2 or similar)
-- **Key generation**: Also requires hardware
-- **PIN/biometric prompts**: UI concerns (out of scope per project constraints)
-
-### What's Tricky
-- **FIDO signature format**: Different structure than standard SSH signatures
-- **Authenticator data**: Need to reconstruct the 69-byte blob correctly
-- **Backward compatibility**: Must not break existing SSH keys
-
----
-
-## Next Steps
-
-1. ✅ Document formats (see `docs/fido_ssh_notes.md`)
-2. ✅ Document touchpoints (this file)
-3. Add FIDO key type atoms to `ssh_transport:default_algorithms1/1` (commented out initially)
-4. Implement `ssh_message:ssh2_pubkey_decode2/1` clause for ECDSA-SK
-5. Test parsing with real OpenSSH ECDSA-SK public key
-6. Implement `ssh_transport:do_verify/5` clause for FIDO signatures
-7. Test verification with real signature + test vector
-8. Repeat for Ed25519-SK
-
----
-
-**Document Status**: Initial touchpoint analysis complete  
-**Last Updated**: 2024  
-**Next Review**: After implementing Task 2.1 (Key Type Recognition)
+**Document status**: Complete — all line numbers verified by direct source
+inspection.  All call paths traced end-to-end.

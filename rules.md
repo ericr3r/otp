@@ -81,7 +81,13 @@ Each milestone is broken into atomic tasks below.
 **Done when**
 - Entry points for new key types are clearly identified
 
-**Status**: NOT STARTED
+**Status**: COMPLETE ✅
+- Identified all 13 functions requiring new pattern-matched heads across 3 modules
+- Traced full server-side auth call graph end-to-end (pre-verify and actual-auth paths)
+- Traced `authorized_keys` parsing path and key file loading path
+- Identified critical correctness issues: `verify_sig/7` binary match bug with SK trailing bytes, `list_to_existing_atom` atom seeding, OID machinery must not be used for SK keys
+- Documented exact line numbers verified by direct source inspection
+- See `docs/otp_ssh_touchpoints.md` for full call graphs and change inventory
 
 ---
 
