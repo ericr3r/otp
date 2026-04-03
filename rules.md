@@ -502,6 +502,92 @@ availability of OpenSSH's `sk-dummy.so` software token.
 - All synthetic verification tests pass for both key types
 - No regressions in existing SSH test suites
 
+**Code changes:**
+
+No production code changes were needed for M6.1.  All required synthetic test
+infrastructure was already in place from M2–M4.2.  M6.1 adds 10 new tests to
+`ssh_pubkey_SUITE.erl` that fill coverage gaps and confirm zero regressions.
+
+**Tests** (10 new, in `ssh_pubkey_SUITE.erl` `ssh_public_key_decode_encode` group):
+
+Regression tests (verify non-SK paths unaffected by SK changes):
+
+- `sk_regression_non_sk_options` — verifies `ssh_options:handle_options/2`
+  still works for non-SK server/client options; confirms `sk_fido_verify_fun`
+  defaults to `undefined` on server and is absent from client options;
+  confirms `no_auth_needed`, `max_sessions`, and `preferred_algorithms`
+  with non-SK algos still function correctly
+- `sk_regression_non_sk_pubkey_decode` — round-trip encode/decode for
+  standard ECDSA P-256, Ed25519, and SK ECDSA keys through
+  `ssh_message:ssh2_pubkey_encode/1` and `ssh2_pubkey_decode/1`; confirms
+  no interference between SK and non-SK key type handling
+- `sk_regression_non_sk_verify` — standard ECDSA P-256 and Ed25519
+  signatures through `ssh_transport:verify/5` (and therefore `do_verify/5`)
+  still verify correctly and reject wrong messages; exercises the non-SK
+  code paths alongside our new SK heads
+- `sk_regression_non_sk_auth` — full non-SK publickey auth flow through
+  `handle_userauth_request/3` for standard Ed25519: both `?FALSE`
+  (pre-check → `ssh_msg_userauth_pk_ok`) and `?TRUE` (actual auth →
+  `ssh_msg_userauth_success`) paths work correctly
+
+Edge-case tests (boundary conditions for SK verification):
+
+- `sk_verify_both_key_types_sequential` — ECDSA-SK verification immediately
+  followed by Ed25519-SK verification; confirms no state leakage between
+  the two SK key type code paths in `do_verify/5`
+- `sk_verify_zero_counter` — Ed25519-SK with flags=0x00 and counter=0
+  (minimum values) verifies correctly; boundary test for the 5-byte
+  flags+counter extraction
+- `sk_verify_max_counter` — ECDSA-SK with counter=0xFFFFFFFF (maximum
+  uint32) verifies correctly; confirms no overflow in the 32-bit counter
+  handling
+- `sk_verify_all_flags` — Ed25519-SK with flags=0xFF (all 8 bits set)
+  verifies correctly; confirms flags byte is passed through to the
+  authenticator data blob without interpretation by the crypto layer
+
+Integration/mixed tests:
+
+- `sk_mixed_auth_sk_then_standard_fallback` — SK ECDSA auth with bad
+  signature fails gracefully, then standard Ed25519 auth succeeds on
+  the same server SSH state; proves SK auth failure does not corrupt
+  auth state or prevent fallback to non-SK key types; uses mixed
+  `authorized_keys` file containing both SK and non-SK keys
+- `sk_option_validate_fido_fun` — exercises `sk_fido_verify_fun` option
+  validation: accepts `undefined` and `fun/1`; rejects integer, `fun/0`,
+  `fun/2`, and non-`undefined` atoms; confirms the check function in
+  `ssh_options:default(server)` works correctly
+
+**Regression validation** (existing non-SK tests confirmed passing):
+
+- 11/11 non-SK decode/encode tests from `ssh_public_key_decode_encode`
+  group: `ssh_rsa_public_key`, `ssh_dsa_public_key`, `ssh_ecdsa_public_key`,
+  `ssh_rfc4716_rsa_comment`, `ssh_rfc4716_dsa_comment`,
+  `ssh_rfc4716_rsa_subject`, `ssh_list_public_key`, `ssh_known_hosts`,
+  `ssh_auth_keys`, `ssh_openssh_key_with_comment`,
+  `ssh_openssh_key_long_header` — all passing ✅
+- 7/7 fingerprint tests from `ssh_hostkey_fingerprint` group — all passing ✅
+- All modified source files compile cleanly with `+warnings_as_errors`
+
+**Synthetic test coverage mapping** (M6.1 spec → tests):
+
+| M6.1 Requirement | Test(s) | Milestone |
+|---|---|---|
+| Correct signature verifies (`true`) | `sk_verify_ecdsa_correct`, `sk_verify_ed25519_correct` | M3.2 |
+| Wrong application → `false` | `sk_verify_wrong_application` | M3.2 |
+| Tampered flags/counter → `false` | `sk_verify_tampered_flags` | M3.2 |
+| Different key → `false` | `sk_verify_wrong_key` | M3.2 |
+| mpint high-bit padding → verifies | `sk_verify_ecdsa_padded_mpint` | M3.2 |
+| `do_verify/5` code path | All M3.2 tests + `sk_verify_*` M6.1 tests | M3.2, M6.1 |
+| `verify_sig/7` code path | All M4.1 tests + `sk_regression_non_sk_auth` | M4.1, M6.1 |
+| Non-SK key handling unchanged | `sk_regression_non_sk_*` (4 tests) | M6.1 |
+| Counter/flags boundary values | `sk_verify_zero_counter`, `sk_verify_max_counter`, `sk_verify_all_flags` | M6.1 |
+| Mixed SK + non-SK auth | `sk_mixed_auth_sk_then_standard_fallback` | M6.1 |
+
+**Status**: COMPLETE ✅
+
+**All SK tests (40 total):** 6 M2 + 6 M3.1 + 6 M3.2 + 6 M4.1 + 6 M4.2 + 10 M6.1 — all passing.
+**Non-SK regression tests:** 18/18 passing (zero regressions).
+
 ---
 
 ### Task 6.2: Tier 2 — Fixture-Based Parsing Tests (always runs)

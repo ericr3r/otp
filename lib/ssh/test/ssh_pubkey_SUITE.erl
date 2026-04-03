@@ -49,11 +49,16 @@
          sk_auth_fallback/1, sk_fido_callback_receives_info/1,
          sk_fido_callback_rejects_no_presence/1, sk_fido_callback_accepts_presence/1,
          sk_fido_counter_monotonicity/1, sk_fido_default_no_callback/1,
-         sk_fido_callback_bad_return/1, ssh_hostkey_fingerprint_md5_implicit/1,
-         ssh_hostkey_fingerprint_md5/1, ssh_hostkey_fingerprint_sha/1,
-         ssh_hostkey_fingerprint_sha256/1, ssh_hostkey_fingerprint_sha384/1,
-         ssh_hostkey_fingerprint_sha512/1, ssh_hostkey_fingerprint_list/1, chk_known_hosts/1,
-         ssh_hostkey_pkcs8/1, ec_private_key_version_compat/1]).
+         sk_fido_callback_bad_return/1, sk_regression_non_sk_options/1,
+         sk_regression_non_sk_pubkey_decode/1, sk_regression_non_sk_verify/1,
+         sk_regression_non_sk_auth/1, sk_verify_both_key_types_sequential/1,
+         sk_verify_zero_counter/1, sk_verify_max_counter/1, sk_verify_all_flags/1,
+         sk_mixed_auth_sk_then_standard_fallback/1, sk_option_validate_fido_fun/1,
+         ssh_hostkey_fingerprint_md5_implicit/1, ssh_hostkey_fingerprint_md5/1,
+         ssh_hostkey_fingerprint_sha/1, ssh_hostkey_fingerprint_sha256/1,
+         ssh_hostkey_fingerprint_sha384/1, ssh_hostkey_fingerprint_sha512/1,
+         ssh_hostkey_fingerprint_list/1, chk_known_hosts/1, ssh_hostkey_pkcs8/1,
+         ec_private_key_version_compat/1]).
 
 -include_lib("common_test/include/ct.hrl").
 -include_lib("public_key/include/public_key.hrl").
@@ -145,7 +150,11 @@ groups() ->
        sk_auth_verify_ed25519, sk_auth_wrong_sig_rejected, sk_auth_fallback,
        sk_fido_callback_receives_info, sk_fido_callback_rejects_no_presence,
        sk_fido_callback_accepts_presence, sk_fido_counter_monotonicity,
-       sk_fido_default_no_callback, sk_fido_callback_bad_return]}].
+       sk_fido_default_no_callback, sk_fido_callback_bad_return, sk_regression_non_sk_options,
+       sk_regression_non_sk_pubkey_decode, sk_regression_non_sk_verify,
+       sk_regression_non_sk_auth, sk_verify_both_key_types_sequential, sk_verify_zero_counter,
+       sk_verify_max_counter, sk_verify_all_flags, sk_mixed_auth_sk_then_standard_fallback,
+       sk_option_validate_fido_fun]}].
 
 %%%----------------------------------------------------------------
 init_per_suite(Config) ->
@@ -1799,6 +1808,406 @@ sk_auth_fallback(_Config) ->
     %% Verify fallback methods are still offered
     true = lists:member($p, Methods) orelse lists:member($k, Methods),
     ct:log("SK auth fallback: failure returned methods=~p", [Methods]).
+
+%%--------------------------------------------------------------------
+%%--------------------------------------------------------------------
+%% Milestone 6.1: Tier 1 — Synthetic Unit Tests (Regression & Edge Cases)
+%%--------------------------------------------------------------------
+
+%%--------------------------------------------------------------------
+sk_regression_non_sk_options(_Config) ->
+    %% Verify that our changes to ssh_options.erl do not break
+    %% non-SK server/client option handling.
+    %% 1. Default server options: sk_fido_verify_fun = undefined
+    Opts1 = ssh_options:handle_options(server, [{system_dir, "/tmp"}]),
+    true = is_map(Opts1),
+    undefined = maps:get(sk_fido_verify_fun, Opts1),
+
+    %% 2. Non-SK options still work
+    Opts2 =
+        ssh_options:handle_options(server,
+                                   [{system_dir, "/tmp"},
+                                    {no_auth_needed, true},
+                                    {max_sessions, 10}]),
+    true = maps:get(no_auth_needed, Opts2),
+    10 = maps:get(max_sessions, Opts2),
+
+    %% 3. Client options do NOT have sk_fido_verify_fun
+    Opts3 = ssh_options:handle_options(client, [{user_dir, "/tmp"}]),
+    false = maps:is_key(sk_fido_verify_fun, Opts3),
+
+    %% 4. preferred_algorithms with only non-SK algos works
+    Opts4 =
+        ssh_options:handle_options(server,
+                                   [{system_dir, "/tmp"},
+                                    {preferred_algorithms,
+                                     [{public_key, ['ssh-ed25519', 'ecdsa-sha2-nistp256']}]}]),
+    PA = maps:get(preferred_algorithms, Opts4),
+    PKAlgs = proplists:get_value(public_key, PA),
+    true = lists:member('ssh-ed25519', PKAlgs),
+    true = lists:member('ecdsa-sha2-nistp256', PKAlgs),
+    false = lists:member('sk-ecdsa-sha2-nistp256@openssh.com', PKAlgs),
+
+    ct:log("M6.1 regression_non_sk_options: all checks passed").
+
+%%--------------------------------------------------------------------
+sk_regression_non_sk_pubkey_decode(_Config) ->
+    %% Verify that standard (non-SK) key encode/decode still works
+    %% after our changes to ssh_message.erl.
+    %% ECDSA P-256
+    {EcPub, _EcPriv} = crypto:generate_key(ecdh, secp256r1),
+    EcKey = {#'ECPoint'{point = EcPub}, {namedCurve, ?secp256r1}},
+    EcBlob = iolist_to_binary(ssh_message:ssh2_pubkey_encode(EcKey)),
+    EcKey = ssh_message:ssh2_pubkey_decode(EcBlob),
+
+    %% Ed25519
+    {EdPub, _EdPriv} = crypto:generate_key(eddsa, ed25519),
+    EdPoint = #'ECPoint'{point = EdPub},
+    EdKey = {EdPoint, {namedCurve, ?'id-Ed25519'}},
+    EdBlob = iolist_to_binary(ssh_message:ssh2_pubkey_encode(EdKey)),
+    EdKey = ssh_message:ssh2_pubkey_decode(EdBlob),
+
+    %% SK ECDSA round-trip still works alongside non-SK
+    SkQ = <<4, (crypto:strong_rand_bytes(64))/binary>>,
+    SkKey = {ecdsa_sk, #'ECPoint'{point = SkQ}, secp256r1, <<"ssh:">>},
+    SkBlob = iolist_to_binary(ssh_message:ssh2_pubkey_encode(SkKey)),
+    SkKey = ssh_message:ssh2_pubkey_decode(SkBlob),
+
+    ct:log("M6.1 regression_non_sk_pubkey_decode: ECDSA, Ed25519, SK round-trips "
+           "all OK").
+
+%%--------------------------------------------------------------------
+sk_regression_non_sk_verify(_Config) ->
+    %% Verify that standard ECDSA and Ed25519 signature verification
+    %% through ssh_transport:verify/5 still works after our changes
+    %% to do_verify/5.
+    %% Standard ECDSA P-256 signature
+    {EcPub, EcPriv} = crypto:generate_key(ecdh, secp256r1),
+    EcKey = {#'ECPoint'{point = EcPub}, {namedCurve, ?secp256r1}},
+    Msg = <<"regression test message">>,
+    EcDerSig = crypto:sign(ecdsa, sha256, Msg, [EcPriv, secp256r1]),
+    #'ECDSA-Sig-Value'{r = R, s = S} = public_key:der_decode('ECDSA-Sig-Value', EcDerSig),
+    Rbin = sk_ssh_mpint(R),
+    Sbin = sk_ssh_mpint(S),
+    EcSig =
+        <<(byte_size(Rbin)):32/unsigned-big-integer,
+          Rbin/binary,
+          (byte_size(Sbin)):32/unsigned-big-integer,
+          Sbin/binary>>,
+    %% Fake SSH record for verify
+    Ssh = #ssh{role = server},
+    true = ssh_transport:verify(Msg, 'ecdsa-sha2-nistp256', EcSig, EcKey, Ssh),
+    false = ssh_transport:verify(<<"wrong">>, 'ecdsa-sha2-nistp256', EcSig, EcKey, Ssh),
+
+    %% Standard Ed25519 signature
+    {EdPub, EdPriv} = crypto:generate_key(eddsa, ed25519),
+    EdKey = {#'ECPoint'{point = EdPub}, {namedCurve, ?'id-Ed25519'}},
+    EdSig = crypto:sign(eddsa, none, Msg, [EdPriv, ed25519]),
+    true = ssh_transport:verify(Msg, 'ssh-ed25519', EdSig, EdKey, Ssh),
+    false = ssh_transport:verify(<<"wrong">>, 'ssh-ed25519', EdSig, EdKey, Ssh),
+
+    ct:log("M6.1 regression_non_sk_verify: standard ECDSA and Ed25519 verify OK").
+
+%%--------------------------------------------------------------------
+sk_regression_non_sk_auth(_Config) ->
+    %% Verify that non-SK publickey auth through handle_userauth_request
+    %% still works (both ?FALSE precheck and ?TRUE verify paths).
+    %% Uses a standard Ed25519 key (not SK).
+    {EdPub, EdPriv} = crypto:generate_key(eddsa, ed25519),
+    EdKey = {#'ECPoint'{point = EdPub}, {namedCurve, ?'id-Ed25519'}},
+    SessionId = crypto:strong_rand_bytes(20),
+    User = "regtest",
+
+    %% Build authorized_keys with standard Ed25519 key
+    Dir = "/tmp/sk_reg_" ++ integer_to_list(erlang:unique_integer([positive])),
+    ok = file:make_dir(Dir),
+    Algo = ssh_transport:public_algo(EdKey),
+    AlgoStr = atom_to_binary(Algo, latin1),
+    KeyBlob = iolist_to_binary(ssh_message:ssh2_pubkey_encode(EdKey)),
+    B64 = base64:encode(KeyBlob),
+    AKLine = <<AlgoStr/binary, " ", B64/binary, " test@test\n">>,
+    ok =
+        file:write_file(
+            filename:join(Dir, "authorized_keys"), AKLine),
+
+    Opts =
+        ssh_options:handle_options(server,
+                                   [{system_dir, Dir},
+                                    {user_dir, Dir},
+                                    {preferred_algorithms, [{public_key, ['ssh-ed25519']}]}]),
+    Ssh0 =
+        #ssh{role = server,
+             session_id = SessionId,
+             opts = Opts,
+             user = undefined,
+             service = "ssh-connection",
+             userauth_methods = ["publickey", "password"],
+             userauth_supported_methods = "publickey,password"},
+
+    AlgBin = <<"ssh-ed25519">>,
+
+    %% 1. Pre-check (?FALSE) should return pk_ok
+    Data1 = <<?FALSE, ?STRING(AlgBin), ?STRING(KeyBlob)>>,
+    Msg1 =
+        #ssh_msg_userauth_request{user = User,
+                                  service = "ssh-connection",
+                                  method = "publickey",
+                                  data = Data1},
+    {not_authorized, {User, undefined}, {Reply1, Ssh1}} =
+        ssh_auth:handle_userauth_request(Msg1, SessionId, Ssh0),
+    #ssh_msg_userauth_pk_ok{algorithm_name = "ssh-ed25519", key_blob = KeyBlob} = Reply1,
+
+    %% 2. Actual auth (?TRUE) should succeed
+    AlgStr2 = "ssh-ed25519",
+    SigData = ssh_auth:build_sig_data(SessionId, User, "ssh-connection", KeyBlob, AlgStr2),
+    InnerSig = crypto:sign(eddsa, none, SigData, [EdPriv, ed25519]),
+    SigBlob = <<?STRING(AlgBin), ?STRING(InnerSig)>>,
+    Data2 = <<?TRUE, ?STRING(AlgBin), ?STRING(KeyBlob), ?STRING(SigBlob)>>,
+    Msg2 =
+        #ssh_msg_userauth_request{user = User,
+                                  service = "ssh-connection",
+                                  method = "publickey",
+                                  data = Data2},
+    {authorized, User, {#ssh_msg_userauth_success{}, _Ssh2}} =
+        ssh_auth:handle_userauth_request(Msg2, SessionId, Ssh1#ssh{user = User}),
+
+    sk_cleanup_dir(Dir),
+    ct:log("M6.1 regression_non_sk_auth: standard Ed25519 precheck + auth "
+           "both OK").
+
+%%--------------------------------------------------------------------
+sk_verify_both_key_types_sequential(_Config) ->
+    %% Verify ECDSA-SK and Ed25519-SK in sequence without state
+    %% leakage.  Both should succeed independently.
+    %% ECDSA-SK
+    {EcPub, EcPriv} = crypto:generate_key(ecdh, secp256r1),
+    EcApp = <<"ssh:">>,
+    EcKey = {ecdsa_sk, #'ECPoint'{point = EcPub}, secp256r1, EcApp},
+    EcMsg = <<"sequential test 1">>,
+    EcFlags = 16#01,
+    EcCounter = 1,
+    EcAppHash = crypto:hash(sha256, EcApp),
+    EcMsgHash = crypto:hash(sha256, EcMsg),
+    EcAuthData =
+        <<EcAppHash/binary, EcFlags:8, EcCounter:32/unsigned-big-integer, EcMsgHash/binary>>,
+    EcDer = crypto:sign(ecdsa, sha256, EcAuthData, [EcPriv, secp256r1]),
+    #'ECDSA-Sig-Value'{r = R, s = S} = public_key:der_decode('ECDSA-Sig-Value', EcDer),
+    Rbin = sk_ssh_mpint(R),
+    Sbin = sk_ssh_mpint(S),
+    EcInner =
+        <<(byte_size(Rbin)):32/unsigned-big-integer,
+          Rbin/binary,
+          (byte_size(Sbin)):32/unsigned-big-integer,
+          Sbin/binary>>,
+    EcSig = <<EcInner/binary, EcFlags:8, EcCounter:32/unsigned-big-integer>>,
+    Ssh = #ssh{role = server},
+    true =
+        ssh_transport:verify(EcMsg, 'sk-ecdsa-sha2-nistp256@openssh.com', EcSig, EcKey, Ssh),
+
+    %% Ed25519-SK
+    {EdPub, EdPriv} = crypto:generate_key(eddsa, ed25519),
+    EdApp = <<"ssh:">>,
+    EdKey = {ed25519_sk, EdPub, EdApp},
+    EdMsg = <<"sequential test 2">>,
+    EdFlags = 16#05,
+    EdCounter = 99,
+    EdAppHash = crypto:hash(sha256, EdApp),
+    EdMsgHash = crypto:hash(sha256, EdMsg),
+    EdAuthData =
+        <<EdAppHash/binary, EdFlags:8, EdCounter:32/unsigned-big-integer, EdMsgHash/binary>>,
+    EdInner = crypto:sign(eddsa, none, EdAuthData, [EdPriv, ed25519]),
+    EdSig = <<EdInner/binary, EdFlags:8, EdCounter:32/unsigned-big-integer>>,
+    true = ssh_transport:verify(EdMsg, 'sk-ssh-ed25519@openssh.com', EdSig, EdKey, Ssh),
+
+    ct:log("M6.1 both_key_types_sequential: ECDSA-SK then Ed25519-SK both "
+           "verified OK").
+
+%%--------------------------------------------------------------------
+sk_verify_zero_counter(_Config) ->
+    %% Edge case: counter=0, flags=0 must still verify correctly.
+    {PubKey, PrivKey} = crypto:generate_key(eddsa, ed25519),
+    Application = <<"ssh:">>,
+    Key = {ed25519_sk, PubKey, Application},
+    Msg = <<"zero counter test">>,
+    Flags = 0,
+    Counter = 0,
+    AppHash = crypto:hash(sha256, Application),
+    MsgHash = crypto:hash(sha256, Msg),
+    AuthData = <<AppHash/binary, Flags:8, Counter:32/unsigned-big-integer, MsgHash/binary>>,
+    InnerSig = crypto:sign(eddsa, none, AuthData, [PrivKey, ed25519]),
+    Sig = <<InnerSig/binary, Flags:8, Counter:32/unsigned-big-integer>>,
+    Ssh = #ssh{role = server},
+    true = ssh_transport:verify(Msg, 'sk-ssh-ed25519@openssh.com', Sig, Key, Ssh),
+    ct:log("M6.1 verify_zero_counter: flags=0x00, counter=0 OK").
+
+%%--------------------------------------------------------------------
+sk_verify_max_counter(_Config) ->
+    %% Edge case: counter=0xFFFFFFFF (max uint32) must work.
+    {PubPoint, PrivKey} = crypto:generate_key(ecdh, secp256r1),
+    Application = <<"ssh:">>,
+    Key = {ecdsa_sk, #'ECPoint'{point = PubPoint}, secp256r1, Application},
+    Msg = <<"max counter test">>,
+    Flags = 16#01,
+    Counter = 16#FFFFFFFF,
+    AppHash = crypto:hash(sha256, Application),
+    MsgHash = crypto:hash(sha256, Msg),
+    AuthData = <<AppHash/binary, Flags:8, Counter:32/unsigned-big-integer, MsgHash/binary>>,
+    DerSig = crypto:sign(ecdsa, sha256, AuthData, [PrivKey, secp256r1]),
+    #'ECDSA-Sig-Value'{r = R, s = S} = public_key:der_decode('ECDSA-Sig-Value', DerSig),
+    Rbin = sk_ssh_mpint(R),
+    Sbin = sk_ssh_mpint(S),
+    InnerSig =
+        <<(byte_size(Rbin)):32/unsigned-big-integer,
+          Rbin/binary,
+          (byte_size(Sbin)):32/unsigned-big-integer,
+          Sbin/binary>>,
+    Sig = <<InnerSig/binary, Flags:8, Counter:32/unsigned-big-integer>>,
+    Ssh = #ssh{role = server},
+    true = ssh_transport:verify(Msg, 'sk-ecdsa-sha2-nistp256@openssh.com', Sig, Key, Ssh),
+    ct:log("M6.1 verify_max_counter: counter=0xFFFFFFFF OK").
+
+%%--------------------------------------------------------------------
+sk_verify_all_flags(_Config) ->
+    %% Edge case: flags=0xFF (all bits set) must still verify — the
+    %% flags byte is part of the signed authenticator data and is not
+    %% interpreted by the crypto layer.
+    {PubKey, PrivKey} = crypto:generate_key(eddsa, ed25519),
+    Application = <<"ssh:">>,
+    Key = {ed25519_sk, PubKey, Application},
+    Msg = <<"all flags test">>,
+    Flags = 16#FF,
+    Counter = 42,
+    AppHash = crypto:hash(sha256, Application),
+    MsgHash = crypto:hash(sha256, Msg),
+    AuthData = <<AppHash/binary, Flags:8, Counter:32/unsigned-big-integer, MsgHash/binary>>,
+    InnerSig = crypto:sign(eddsa, none, AuthData, [PrivKey, ed25519]),
+    Sig = <<InnerSig/binary, Flags:8, Counter:32/unsigned-big-integer>>,
+    Ssh = #ssh{role = server},
+    true = ssh_transport:verify(Msg, 'sk-ssh-ed25519@openssh.com', Sig, Key, Ssh),
+    ct:log("M6.1 verify_all_flags: flags=0xFF OK").
+
+%%--------------------------------------------------------------------
+sk_mixed_auth_sk_then_standard_fallback(_Config) ->
+    %% After an SK auth failure, a non-SK key in authorized_keys can
+    %% still be used for a subsequent standard publickey auth attempt.
+    %% This tests that SK failure does not corrupt auth state.
+    %% Create two keys: one SK, one standard Ed25519
+    {SkPub, _SkPriv} = crypto:generate_key(ecdh, secp256r1),
+    SkApp = <<"ssh:">>,
+    SkKey = {ecdsa_sk, #'ECPoint'{point = SkPub}, secp256r1, SkApp},
+
+    {EdPub, EdPriv} = crypto:generate_key(eddsa, ed25519),
+    EdKey = {#'ECPoint'{point = EdPub}, {namedCurve, ?'id-Ed25519'}},
+
+    SessionId = crypto:strong_rand_bytes(20),
+    User = "mixtest",
+
+    %% Write both keys to authorized_keys
+    Dir = "/tmp/sk_mix_" ++ integer_to_list(erlang:unique_integer([positive])),
+    ok = file:make_dir(Dir),
+    SkAlgo = atom_to_binary(ssh_transport:public_algo(SkKey), latin1),
+    SkBlob = iolist_to_binary(ssh_message:ssh2_pubkey_encode(SkKey)),
+    EdAlgo = atom_to_binary(ssh_transport:public_algo(EdKey), latin1),
+    EdBlob = iolist_to_binary(ssh_message:ssh2_pubkey_encode(EdKey)),
+    AKContent =
+        <<SkAlgo/binary,
+          " ",
+          (base64:encode(SkBlob))/binary,
+          " sk@test\n",
+          EdAlgo/binary,
+          " ",
+          (base64:encode(EdBlob))/binary,
+          " ed@test\n">>,
+    ok =
+        file:write_file(
+            filename:join(Dir, "authorized_keys"), AKContent),
+
+    Opts =
+        ssh_options:handle_options(server,
+                                   [{system_dir, Dir},
+                                    {user_dir, Dir},
+                                    {preferred_algorithms,
+                                     [{public_key,
+                                       ['sk-ecdsa-sha2-nistp256@openssh.com',
+                                        'sk-ssh-ed25519@openssh.com',
+                                        'ssh-ed25519',
+                                        'ecdsa-sha2-nistp256']}]}]),
+    Ssh0 =
+        #ssh{role = server,
+             session_id = SessionId,
+             opts = Opts,
+             user = User,
+             service = "ssh-connection",
+             userauth_methods = ["publickey", "password"],
+             userauth_supported_methods = "publickey,password"},
+
+    %% 1. SK auth with bad signature → should fail gracefully
+    SkAlgBin = <<"sk-ecdsa-sha2-nistp256@openssh.com">>,
+    BadSig = <<(crypto:strong_rand_bytes(72))/binary, 1:8, 0:32/unsigned-big-integer>>,
+    SkSigBlob = <<?STRING(SkAlgBin), ?STRING(BadSig)>>,
+    SkData = <<?TRUE, ?STRING(SkAlgBin), ?STRING(SkBlob), ?STRING(SkSigBlob)>>,
+    SkMsg =
+        #ssh_msg_userauth_request{user = User,
+                                  service = "ssh-connection",
+                                  method = "publickey",
+                                  data = SkData},
+    {not_authorized,
+     {User, undefined},
+     {#ssh_msg_userauth_failure{authentications = Methods}, Ssh1}} =
+        ssh_auth:handle_userauth_request(SkMsg, SessionId, Ssh0),
+    true = length(Methods) > 0,
+
+    %% 2. Standard Ed25519 auth should succeed (state not corrupted)
+    EdAlgBin = <<"ssh-ed25519">>,
+    EdAlgStr = "ssh-ed25519",
+    EdSigData = ssh_auth:build_sig_data(SessionId, User, "ssh-connection", EdBlob, EdAlgStr),
+    EdInner = crypto:sign(eddsa, none, EdSigData, [EdPriv, ed25519]),
+    EdSigBlob = <<?STRING(EdAlgBin), ?STRING(EdInner)>>,
+    EdData = <<?TRUE, ?STRING(EdAlgBin), ?STRING(EdBlob), ?STRING(EdSigBlob)>>,
+    EdMsg =
+        #ssh_msg_userauth_request{user = User,
+                                  service = "ssh-connection",
+                                  method = "publickey",
+                                  data = EdData},
+    {authorized, User, {#ssh_msg_userauth_success{}, _Ssh2}} =
+        ssh_auth:handle_userauth_request(EdMsg, SessionId, Ssh1#ssh{user = User}),
+
+    sk_cleanup_dir(Dir),
+    ct:log("M6.1 mixed_auth: SK failure then standard Ed25519 success").
+
+%%--------------------------------------------------------------------
+sk_option_validate_fido_fun(_Config) ->
+    %% Validate that sk_fido_verify_fun accepts correct values and
+    %% rejects invalid ones.
+    %% Accepted: undefined (default)
+    #{sk_fido_verify_fun := undefined} =
+        ssh_options:handle_options(server, [{system_dir, "/tmp"}]),
+
+    %% Accepted: fun/1
+    F1 = fun(_) -> ok end,
+    #{sk_fido_verify_fun := F1} =
+        ssh_options:handle_options(server, [{system_dir, "/tmp"}, {sk_fido_verify_fun, F1}]),
+
+    %% Rejected: integer
+    {error, _} =
+        ssh_options:handle_options(server, [{system_dir, "/tmp"}, {sk_fido_verify_fun, 42}]),
+
+    %% Rejected: fun/0 (wrong arity)
+    {error, _} =
+        ssh_options:handle_options(server,
+                                   [{system_dir, "/tmp"}, {sk_fido_verify_fun, fun() -> ok end}]),
+
+    %% Rejected: fun/2 (wrong arity)
+    {error, _} =
+        ssh_options:handle_options(server,
+                                   [{system_dir, "/tmp"},
+                                    {sk_fido_verify_fun, fun(_, _) -> ok end}]),
+
+    %% Rejected: atom (not undefined)
+    {error, _} =
+        ssh_options:handle_options(server, [{system_dir, "/tmp"}, {sk_fido_verify_fun, true}]),
+
+    ct:log("M6.1 option_validate_fido_fun: all validation checks OK").
 
 %%--------------------------------------------------------------------
 ssh_openssh_key_with_comment(Config) when is_list(Config) ->
