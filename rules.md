@@ -251,6 +251,52 @@ items 18 and 21):
 **Done when**
 - Signature verification passes for test vectors
 
+**Code changes:**
+
+1. `ssh_transport.erl` — `do_verify/5` ECDSA-SK head (before catch-all):
+   splits `Sig` into inner ECDSA sig + flags(1) + counter(4), extracts
+   `Application` from key tuple, reconstructs 69-byte authenticator data
+   blob via `fido_authenticator_data/4`, DER-encodes `(r, s)` from SSH
+   `mpint` format, and calls `public_key:verify/4` with `{Q, {namedCurve,
+   secp256r1}}`.
+2. `ssh_transport.erl` — `do_verify/5` Ed25519-SK head (before catch-all):
+   splits `Sig` into inner Ed25519 sig (64 bytes) + flags(1) + counter(4),
+   reconstructs authenticator data blob, and calls `public_key:verify/4`
+   with `{#'ECPoint'{point=PubKey}, {namedCurve, ?'id-Ed25519'}}` and
+   hash `undefined` (EdDSA handles its own internal hashing).
+3. `ssh_transport.erl` — new private `fido_authenticator_data/4` helper:
+   constructs `SHA-256(Application) || Flags:8 || Counter:32 ||
+   SHA-256(Message)` (69 bytes).  Shared by both SK `do_verify` heads.
+4. `ssh_transport.erl` — `default_algorithms1(public_key)` (L197): removed
+   SK atoms from the blacklist.  SK algorithms are now fully functional
+   and enabled by default.
+
+**Tests** (6 new, in `ssh_pubkey_SUITE.erl` `ssh_public_key_decode_encode` group):
+- `sk_verify_ecdsa_correct` — real ECDSA/P-256 keypair, sign authenticator
+  data blob, verify through `ssh_transport:verify/5` → `true`
+- `sk_verify_ed25519_correct` — real Ed25519 keypair, sign authenticator
+  data blob, verify through `ssh_transport:verify/5` → `true`
+- `sk_verify_wrong_application` — correct Ed25519-SK signature but key
+  has wrong application string → `false`; same sig with correct app → `true`
+- `sk_verify_tampered_flags` — sign with flags=0x01, verify with
+  flags=0x05 in sig → `false`; original flags → `true`
+- `sk_verify_wrong_key` — sign with ECDSA key A, verify with key B →
+  `false`; verify with key A → `true`
+- `sk_verify_ecdsa_padded_mpint` — repeatedly sign until `r` or `s`
+  requires 33-byte mpint encoding (high-bit padding), verify → `true`
+
+**Test updates** (from Milestone 3.1):
+- `sk_supported_algorithms` — updated: SK atoms now in BOTH
+  `supported_algorithms` AND `default_algorithms` (no longer blacklisted)
+- `sk_verify_sig_parse_ecdsa` — updated comments: do_verify/5 SK head now
+  handles ECDSA-SK; random key still → `false` (no crash)
+- `sk_verify_sig_parse_ed25519` — fixed: `crypto:generate_key(eddsa,
+  ed25519)` returns `{Pub, Priv}` tuple, not a map; random sig → `false`
+
+**Status**: COMPLETE ✅
+
+**All SK tests (18 total):** 6 Milestone 2 + 6 Milestone 3.1 + 6 Milestone 3.2 — all passing.
+
 ---
 
 ## Milestone 4: Auth Flow Integration
