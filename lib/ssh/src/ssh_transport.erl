@@ -198,7 +198,10 @@ default_algorithms1(public_key) ->
     supported_algorithms(public_key, [
                                       'ssh-rsa',
                                       %% Gone in OpenSSH 7.3.p1:
-                                      'ssh-dss'
+                                      'ssh-dss',
+                                      %% SK: disabled until do_verify/5 handles SK sigs (Milestone 3.2):
+                                      'sk-ecdsa-sha2-nistp256@openssh.com',
+                                      'sk-ssh-ed25519@openssh.com'
                                      ]);
 
 default_algorithms1(compression) ->

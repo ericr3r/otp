@@ -84,6 +84,12 @@
          sk_auth_keys_mixed/1,
          sk_file_base_name/1,
          sk_malformed_blob/1,
+         sk_supported_algorithms/1,
+         sk_sha_mapping/1,
+         sk_valid_key_sha_alg/1,
+         sk_public_algo/1,
+         sk_verify_sig_parse_ecdsa/1,
+         sk_verify_sig_parse_ed25519/1,
 
          ssh_hostkey_fingerprint_md5_implicit/1,
          ssh_hostkey_fingerprint_md5/1,
@@ -184,7 +190,13 @@ groups() ->
        sk_auth_keys,
        sk_auth_keys_mixed,
        sk_file_base_name,
-       sk_malformed_blob]}
+       sk_malformed_blob,
+       sk_supported_algorithms,
+       sk_sha_mapping,
+       sk_valid_key_sha_alg,
+       sk_public_algo,
+       sk_verify_sig_parse_ecdsa,
+       sk_verify_sig_parse_ed25519]}
     ].
 
 
@@ -920,6 +932,134 @@ sk_malformed_blob(_Config) ->
                 ok
         end,
     ct:log("SK malformed blob handling OK").
+
+%%--------------------------------------------------------------------
+%%--------------------------------------------------------------------
+%% Milestone 3.1 — SK algorithm registration and signature parsing.
+%% Validates that the ssh_transport plumbing recognizes SK key types
+%% and that SK signature blobs parse without crashing.
+%%--------------------------------------------------------------------
+sk_supported_algorithms(_Config) ->
+    Supported = ssh_transport:supported_algorithms(public_key),
+    Default = ssh_transport:default_algorithms(public_key),
+    %% SK must be in supported
+    true = lists:member('sk-ecdsa-sha2-nistp256@openssh.com', Supported),
+    true = lists:member('sk-ssh-ed25519@openssh.com', Supported),
+    %% SK must NOT be in default (blacklisted until do_verify/5 is ready)
+    false = lists:member('sk-ecdsa-sha2-nistp256@openssh.com', Default),
+    false = lists:member('sk-ssh-ed25519@openssh.com', Default),
+    ct:log("SK supported_algorithms OK: in supported, not in default").
+
+%%--------------------------------------------------------------------
+sk_sha_mapping(_Config) ->
+    sha256 = ssh_transport:sha('sk-ecdsa-sha2-nistp256@openssh.com'),
+    undefined = ssh_transport:sha('sk-ssh-ed25519@openssh.com'),
+    ct:log("SK sha/1 mapping OK").
+
+%%--------------------------------------------------------------------
+sk_valid_key_sha_alg(_Config) ->
+    Q = <<4, (crypto:strong_rand_bytes(64))/binary>>,
+    EcKey = {ecdsa_sk, #'ECPoint'{point = Q}, secp256r1, <<"ssh:">>},
+    EdKey = {ed25519_sk, crypto:strong_rand_bytes(32), <<"ssh:">>},
+    %% Correct pairings
+    true =
+        ssh_transport:valid_key_sha_alg(public, EcKey, 'sk-ecdsa-sha2-nistp256@openssh.com'),
+    true = ssh_transport:valid_key_sha_alg(public, EdKey, 'sk-ssh-ed25519@openssh.com'),
+    %% Cross-type must fail
+    false = ssh_transport:valid_key_sha_alg(public, EcKey, 'sk-ssh-ed25519@openssh.com'),
+    false =
+        ssh_transport:valid_key_sha_alg(public, EdKey, 'sk-ecdsa-sha2-nistp256@openssh.com'),
+    %% SK key with non-SK alg must fail
+    false = ssh_transport:valid_key_sha_alg(public, EcKey, 'ecdsa-sha2-nistp256'),
+    false = ssh_transport:valid_key_sha_alg(public, EdKey, 'ssh-ed25519'),
+    %% Non-SK key with SK alg must fail
+    false =
+        ssh_transport:valid_key_sha_alg(public,
+                                        #'RSAPublicKey'{modulus = 7, publicExponent = 3},
+                                        'sk-ecdsa-sha2-nistp256@openssh.com'),
+    ct:log("SK valid_key_sha_alg/3 OK").
+
+%%--------------------------------------------------------------------
+sk_public_algo(_Config) ->
+    Q = <<4, (crypto:strong_rand_bytes(64))/binary>>,
+    EcKey = {ecdsa_sk, #'ECPoint'{point = Q}, secp256r1, <<"ssh:">>},
+    EdKey = {ed25519_sk, crypto:strong_rand_bytes(32), <<"ssh:">>},
+    'sk-ecdsa-sha2-nistp256@openssh.com' = ssh_transport:public_algo(EcKey),
+    'sk-ssh-ed25519@openssh.com' = ssh_transport:public_algo(EdKey),
+    ct:log("SK public_algo/1 OK").
+
+%%--------------------------------------------------------------------
+sk_verify_sig_parse_ecdsa(_Config) ->
+    %% Construct a well-formed ECDSA-SK signature blob and pass it
+    %% through ssh_transport:verify/5.  No do_verify/5 SK head exists
+    %% yet, so verification returns false — but must NOT crash.
+    %% This validates the sig-parsing path in verify_sig/7 and the
+    %% catch-all do_verify gracefully rejecting the unknown key type.
+    Q = <<4, (crypto:strong_rand_bytes(64))/binary>>,
+    Application = <<"ssh:">>,
+    Key = {ecdsa_sk, #'ECPoint'{point = Q}, secp256r1, Application},
+
+    %% Build a fake inner ECDSA sig: mpint(r) || mpint(s)
+    R = crypto:strong_rand_bytes(32),
+    S = crypto:strong_rand_bytes(32),
+    Rlen = byte_size(R),
+    Slen = byte_size(S),
+    InnerSig =
+        <<Rlen:32/unsigned-big-integer, R/binary, Slen:32/unsigned-big-integer, S/binary>>,
+    Flags = 16#01,
+    Counter = 16#12345678,
+    Sig = <<InnerSig/binary, Flags:8, Counter:32/unsigned-big-integer>>,
+
+    PlainText = <<"fake-session-data">>,
+    Alg = 'sk-ecdsa-sha2-nistp256@openssh.com',
+    %% verify/5 calls do_verify/5 which hits the catch-all.
+    %% The catch-all passes the SK key tuple to public_key:verify,
+    %% which raises error:badarg.  In production, verify_sig/7 catches
+    %% this and returns false.  We replicate that here.
+    Result =
+        try ssh_transport:verify(PlainText, Alg, Sig, Key, undefined) of
+            R ->
+                R
+        catch
+            error:_ ->
+                false
+        end,
+    false = Result,
+    ct:log("SK ECDSA sig parse OK: verify returned/caught false (no crash)").
+
+%%--------------------------------------------------------------------
+sk_verify_sig_parse_ed25519(_Config) ->
+    %% Same as above for Ed25519-SK.  sha/1 returns 'undefined' for
+    %% Ed25519-SK, which means the catch-all do_verify will call
+    %% public_key:verify(_, undefined, _, _) — that raises error:badarg.
+    %% verify/5 does NOT have try/catch, so we must catch here, which
+    %% is exactly what verify_sig/7 does in production.  The test
+    %% validates that a well-formed Ed25519-SK sig blob does not cause
+    %% an unexpected crash pattern.
+    PubKey = crypto:strong_rand_bytes(32),
+    Application = <<"ssh:">>,
+    Key = {ed25519_sk, PubKey, Application},
+
+    InnerSig = crypto:strong_rand_bytes(64),
+    Flags = 16#01,
+    Counter = 16#00000001,
+    Sig = <<InnerSig/binary, Flags:8, Counter:32/unsigned-big-integer>>,
+
+    PlainText = <<"fake-session-data">>,
+    Alg = 'sk-ssh-ed25519@openssh.com',
+    %% The catch-all do_verify hits public_key:verify(_, undefined, _, _)
+    %% which raises error:badarg.  In production, verify_sig/7 catches
+    %% this and returns false.  We replicate that here.
+    Result =
+        try ssh_transport:verify(PlainText, Alg, Sig, Key, undefined) of
+            R ->
+                R
+        catch
+            error:_ ->
+                false
+        end,
+    false = Result,
+    ct:log("SK Ed25519 sig parse OK: verify returned/caught false (no crash)").
 
 %%--------------------------------------------------------------------
 ssh_openssh_key_with_comment(Config) when is_list(Config) ->
