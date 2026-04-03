@@ -560,6 +560,29 @@ pre_verify_sig(User, KeyBlob,  #ssh{opts=Opts}) ->
 	    false
     end.
 
+verify_sig(SessionId, User, Service, BAlg, KeyBlob, SigWLen,
+           #ssh{opts=Opts} = Ssh)
+  when BAlg =:= <<"sk-ecdsa-sha2-nistp256@openssh.com">>;
+       BAlg =:= <<"sk-ssh-ed25519@openssh.com">> ->
+    try
+        Alg = binary_to_list(BAlg),
+        true = lists:member(list_to_existing_atom(Alg),
+                            proplists:get_value(public_key,
+                                                ?GET_OPT(preferred_algorithms,Opts))),
+        Key = ssh_message:ssh2_pubkey_decode(KeyBlob),
+        true = ssh_transport:call_KeyCb(is_auth_key, [Key, User], Opts),
+        PlainText = build_sig_data(SessionId, User, Service, KeyBlob, Alg),
+        <<?UINT32(AlgSigLen), AlgSig:AlgSigLen/binary>> = SigWLen,
+        %% SK sigs: alg_name || inner_sig_string || flags_byte || counter_u32
+        <<?UINT32(AlgLen), _SigAlg:AlgLen/binary,
+          ?UINT32(SigLen), InnerSig:SigLen/binary,
+          FlagsAndCounter/binary>> = AlgSig,
+        Sig = <<InnerSig/binary, FlagsAndCounter/binary>>,
+        ssh_transport:verify(PlainText, list_to_existing_atom(Alg), Sig, Key, Ssh)
+    catch
+	_:_ ->
+	    false
+    end;
 verify_sig(SessionId, User, Service, AlgBin, KeyBlob, SigWLen, #ssh{opts=Opts} = Ssh) ->
     try
         Alg = binary_to_list(AlgBin),
@@ -591,6 +614,8 @@ build_sig_data(SessionId, User, Service, KeyBlob, Alg) ->
 
 
 
+key_alg('sk-ecdsa-sha2-nistp256@openssh.com') -> 'sk-ecdsa-sha2-nistp256@openssh.com';
+key_alg('sk-ssh-ed25519@openssh.com')         -> 'sk-ssh-ed25519@openssh.com';
 key_alg('rsa-sha2-256') -> 'ssh-rsa';
 key_alg('rsa-sha2-512') -> 'ssh-rsa';
 key_alg(Alg) -> Alg.

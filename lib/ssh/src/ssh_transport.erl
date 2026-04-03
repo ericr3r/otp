@@ -231,6 +231,8 @@ supported_algorithms(kex) ->
 supported_algorithms(public_key) ->
     select_crypto_supported(
       [
+       {'sk-ssh-ed25519@openssh.com',         [{public_keys,eddsa}, {curves,ed25519}]},
+       {'sk-ecdsa-sha2-nistp256@openssh.com', [{public_keys,ecdsa}, {hashs,sha256}, {curves,secp256r1}]},
        {'ssh-ed25519',          [{public_keys,eddsa}, {curves,ed25519}                    ]},
        {'ssh-ed448',            [{public_keys,eddsa}, {curves,ed448}                      ]},
        {'ecdsa-sha2-nistp521',  [{public_keys,ecdsa}, {hashs,sha512}, {curves,secp521r1}]},
@@ -2273,6 +2275,11 @@ valid_key_sha_alg(public, {#'ECPoint'{},{namedCurve,OID}}, Alg) ->
     valid_key_sha_alg_ec(OID, Alg);
 valid_key_sha_alg(private, #'ECPrivateKey'{parameters = {namedCurve,OID}}, Alg) ->
     valid_key_sha_alg_ec(OID, Alg);
+
+valid_key_sha_alg(public, {ecdsa_sk, #'ECPoint'{}, secp256r1, _},
+                  'sk-ecdsa-sha2-nistp256@openssh.com') -> true;
+valid_key_sha_alg(public, {ed25519_sk, _, _},
+                  'sk-ssh-ed25519@openssh.com')         -> true;
 valid_key_sha_alg(_, _, _) -> false.
 
 
@@ -2285,6 +2292,10 @@ valid_key_sha_alg_ec(_, _) -> false.
 
 -dialyzer({no_match, public_algo/1}).
 
+public_algo({ecdsa_sk, #'ECPoint'{}, secp256r1, _App}) ->
+    'sk-ecdsa-sha2-nistp256@openssh.com';
+public_algo({ed25519_sk, _Key, _App}) ->
+    'sk-ssh-ed25519@openssh.com';
 public_algo(#'RSAPublicKey'{}) ->   'ssh-rsa';  % FIXME: Not right with draft-curdle-rsa-sha2
 public_algo({_, #'Dss-Parms'{}}) -> 'ssh-dss';
 public_algo({#'ECPoint'{},{namedCurve,OID}}) when is_tuple(OID) -> 
@@ -2292,6 +2303,8 @@ public_algo({#'ECPoint'{},{namedCurve,OID}}) when is_tuple(OID) ->
     binary_to_atom(SshCurveType).
 
 
+sha('sk-ecdsa-sha2-nistp256@openssh.com') -> sha256;
+sha('sk-ssh-ed25519@openssh.com')         -> undefined; % Ed25519 is prehashed
 sha('ssh-rsa') -> sha;
 sha('rsa-sha2-256') -> sha256;
 sha('rsa-sha2-384') -> sha384;
