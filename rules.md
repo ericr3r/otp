@@ -1,7 +1,10 @@
 # Agents: Add FIDO (Security Key) Support to Erlang SSH
 
-This project adds support for FIDO2 / WebAuthn-backed SSH keys
-(`ecdsa-sk`, `ed25519-sk`) to Erlang/OTP's `ssh` application.
+This project adds **server-side** support for FIDO2 / WebAuthn-backed SSH keys
+(`ecdsa-sk`, `ed25519-sk`) to Erlang/OTP's `ssh` application.  The goal is to
+allow an OTP SSH server to accept connections from clients that authenticate
+with a FIDO hardware token.  The OTP SSH client acting as a FIDO key holder
+(i.e. signing with hardware) is explicitly out of scope.
 
 Work should proceed in **small, verifiable steps** with tests and
 comparison against OpenSSH behavior at each stage.
@@ -11,8 +14,8 @@ comparison against OpenSSH behavior at each stage.
 ## High-Level Goals
 
 - Parse and handle `*-sk` public key formats
-- Support SSH authentication using FIDO-backed keys
-- Interoperate with OpenSSH clients and servers
+- Allow an OTP SSH **server** to verify FIDO-backed client authentication
+- Interoperate with OpenSSH **clients** authenticating with FIDO keys
 - Avoid introducing hard dependencies where possible
 - Keep changes isolated and incremental
 
@@ -20,6 +23,7 @@ comparison against OpenSSH behavior at each stage.
 
 ## Constraints & Non-Goals
 
+- **Server-side only** — signing with a FIDO token (OTP acting as a FIDO client) is out of scope; signing happens on the user's machine before the request reaches OTP
 - **No UI work** (PIN prompts may be delegated)
 - **No proprietary libraries**
 - Avoid breaking existing `ssh` public key auth
@@ -34,7 +38,7 @@ comparison against OpenSSH behavior at each stage.
 2. Public key parsing
 3. Signature verification
 4. Auth flow integration
-5. Hardware interaction
+5. ~~Hardware interaction~~ (out of scope — signing requires hardware; not needed for server-side verification)
 6. Testing & interoperability
 7. Documentation & cleanup
 
@@ -165,26 +169,14 @@ Each milestone is broken into atomic tasks below.
 
 ---
 
-## Milestone 5: Hardware Interaction (Optional / Pluggable)
+## Milestone 5: Hardware Interaction — OUT OF SCOPE
 
-### Task 5.1: Define Authenticator Interface
-- Behavior for:
-  - Signing challenge
-  - PIN entry
-- No implementation yet
+Signing a challenge with a FIDO token is only required when OTP SSH acts as a
+FIDO **client**.  This project targets server-side verification only.  The
+client's OpenSSH (or other SSH client) handles all hardware interaction before
+the authentication request arrives at the OTP server.
 
-**Done when**
-- Interface is stable and documented
-
----
-
-### Task 5.2: Reference Implementation (Optional)
-- Implement via:
-  - External helper
-  - or libfido2 (NIF)
-
-**Done when**
-- Hardware-backed auth works in at least one environment
+No tasks in this milestone will be implemented.
 
 ---
 
