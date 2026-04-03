@@ -379,6 +379,88 @@ items 18 and 21):
 **Done when**
 - Caller can distinguish "touch required" vs "invalid key"
 
+**Code changes:**
+
+1. `ssh_options.erl` — added `sk_fido_verify_fun` server option:
+   - Default: `undefined` (backward compatible — all SK auths accepted)
+   - Type: `fun(FidoInfo :: map()) -> ok | {error, Reason}`
+   - Validated by `check_function1/1` or `undefined`
+   - Class: `user_option`
+
+2. `ssh_auth.erl` — modified `verify_sig/7` SK clause:
+   - After successful cryptographic verification via `ssh_transport:verify/5`,
+     extracts `Flags` and `Counter` from the last 5 bytes of the `Sig` binary
+     (same split point used by `do_verify/5` in `ssh_transport`)
+   - Constructs a `FidoInfo` map:
+     ```
+     #{flags => integer(),           %% raw flags byte
+       counter => integer(),         %% 32-bit monotonic counter
+       user_presence => boolean(),   %% flags band 0x01 =/= 0
+       user_verification => boolean(), %% flags band 0x04 =/= 0
+       user => string(),             %% SSH username
+       algorithm => atom()}          %% e.g. 'sk-ecdsa-sha2-nistp256@openssh.com'
+     ```
+   - Invokes `sk_fido_verify_fun` callback if configured:
+     - `ok` → auth succeeds (`true`)
+     - `{error, _}` → auth fails (`false`)
+     - Any other return → auth fails (`false`, graceful rejection)
+   - If `sk_fido_verify_fun` is `undefined`, auth succeeds (backward compat)
+   - All callback errors are caught by the existing `try/catch` in `verify_sig`
+
+**Design decisions:**
+
+- **Callback over error tuple**: A callback (`fun/1`) was chosen over an error
+  tuple because it allows the application to implement arbitrary policy:
+  - Require user presence (UP flag, bit 0)
+  - Require user verification (UV flag, bit 2)
+  - Enforce counter monotonicity (compare against stored last-seen counter)
+  - Log FIDO metadata for audit trails
+  - Combine multiple checks in a single callback
+- **Counter exposed but not enforced**: The counter value is passed to the
+  callback but OTP SSH does not maintain counter state itself.  Counter
+  monotonicity enforcement requires persistent storage, which is
+  application-specific.  The callback enables this without prescribing a
+  storage mechanism.
+- **Flags byte exposed raw**: Both the raw `flags` integer and decoded
+  booleans (`user_presence`, `user_verification`) are provided, allowing
+  the callback to check any FIDO flag bit including future extensions
+  (AT=0x40, ED=0x80).
+
+**Tests** (6 new, in `ssh_pubkey_SUITE.erl` `ssh_public_key_decode_encode` group):
+
+- `sk_fido_callback_receives_info` — verifies the callback receives a map
+  with all expected keys (`flags`, `counter`, `user_presence`,
+  `user_verification`, `user`, `algorithm`) and correct values for an
+  ECDSA-SK auth with flags=0x05 (UP+UV) and counter=0x42
+- `sk_fido_callback_rejects_no_presence` — policy callback requires UP
+  (bit 0); signature has flags=0x00 → callback returns
+  `{error, user_presence_required}` → auth rejected with
+  `ssh_msg_userauth_failure`
+- `sk_fido_callback_accepts_presence` — same policy callback; Ed25519-SK
+  signature has flags=0x01 (UP set) → callback returns `ok` → auth
+  succeeds with `ssh_msg_userauth_success`
+- `sk_fido_counter_monotonicity` — demonstrates counter delivery to
+  callback across two sequential auth attempts (counter=100, then
+  counter=200); verifies the callback receives both values in order,
+  enabling monotonicity enforcement
+- `sk_fido_default_no_callback` — with `sk_fido_verify_fun` unset
+  (default `undefined`), Ed25519-SK auth with flags=0x00 (no UP, no UV)
+  still succeeds — confirms backward compatibility
+- `sk_fido_callback_bad_return` — callback returns `banana` (not `ok`
+  or `{error,_}`) → auth rejected gracefully (no crash), returns
+  `ssh_msg_userauth_failure`
+
+**Test helpers** (1 new):
+
+- `sk_make_server_ssh/4`: extended version of `sk_make_server_ssh/3`
+  accepting an `ExtraOpts` list that is appended to the server options
+  passed to `ssh_options:handle_options/2`, enabling tests to set
+  `sk_fido_verify_fun` and other options
+
+**Status**: COMPLETE ✅
+
+**All SK tests (30 total):** 6 Milestone 2 + 6 Milestone 3.1 + 6 Milestone 3.2 + 6 Milestone 4.1 + 6 Milestone 4.2 — all passing.
+
 ---
 
 ## Milestone 5: Hardware Interaction — OUT OF SCOPE

@@ -538,7 +538,46 @@ verify_sig(SessionId, User, Service, BAlg, KeyBlob, SigWLen, #ssh{opts = Opts} =
           FlagsAndCounter/binary>> =
             AlgSig,
         Sig = <<InnerSig/binary, FlagsAndCounter/binary>>,
-        ssh_transport:verify(PlainText, list_to_existing_atom(Alg), Sig, Key, Ssh)
+        %% Extract flags and counter from the last 5 bytes of Sig
+        %% (do_verify also splits them this way).  The 5-byte tail is
+        %% always present: flags:8 || counter:32.
+        SigSize = byte_size(Sig),
+        {Flags, Counter} =
+            case SigSize > 5 of
+                true ->
+                    FcOffset = SigSize - 5,
+                    <<_:FcOffset/binary, F:8, C:32/unsigned-big-integer>> = Sig,
+                    {F, C};
+                false ->
+                    %% Degenerate case – let verify reject it
+                    {0, 0}
+            end,
+        case ssh_transport:verify(PlainText, list_to_existing_atom(Alg), Sig, Key, Ssh) of
+            true ->
+                %% Crypto verification succeeded; now apply FIDO policy callback
+                FidoInfo =
+                    #{flags => Flags,
+                      counter => Counter,
+                      user_presence => Flags band 16#01 =/= 0,
+                      user_verification => Flags band 16#04 =/= 0,
+                      user => User,
+                      algorithm => list_to_existing_atom(Alg)},
+                case ?GET_OPT(sk_fido_verify_fun, Opts) of
+                    undefined ->
+                        true;
+                    VerifyFun when is_function(VerifyFun, 1) ->
+                        case VerifyFun(FidoInfo) of
+                            ok ->
+                                true;
+                            {error, _Reason} ->
+                                false;
+                            _ ->
+                                false
+                        end
+                end;
+            false ->
+                false
+        end
     catch
         _:_ ->
             false
