@@ -260,7 +260,15 @@ hardware, so `ssh-keygen` and `ssh` can generate keys and sign transparently.
 - Update:
   - `ssh(6)`
   - `ssh_daemon`
-- Include limitations
+- Include limitations, in particular:
+  - **No counter monotonicity enforcement** — the FIDO signature counter is
+    included in the cryptographic verification (tampering causes verification
+    failure), but the server does not track `last_seen_counter` per key or
+    reject signatures where `counter <= last_seen_counter`.  This means cloned
+    tokens cannot be detected via counter regression.  OpenSSH's own `sshd`
+    also does not enforce this by default.  Document this as a known limitation
+    and potential future enhancement (would require persistent per-key state
+    and a storage/callback mechanism).
 
 ---
 
