@@ -59,7 +59,14 @@ Each milestone is broken into atomic tasks below.
 - Formats are written down with byte-level detail
 - At least one real key inspected via `ssh-keygen -vv`
 
-**Status**: NOT STARTED
+**Status**: COMPLETE ✅
+- Verified both key type wire formats with byte-level hex dumps from real keys
+- Inspected real ECDSA-SK key (OpenSSH test key by djm@google.com) via `ssh-keygen -vv`
+- Inspected real Ed25519-SK key (hardware token, eric@rauer.dev) via `ssh-keygen -vv`
+- Corrected inaccuracy: ECDSA inner `r`/`s` are `mpint`, not `string` — length may be 33 bytes when high bit is set
+- Documented full FIDO-signed blob: `SHA-256(application) || flags || counter || extensions || SHA-256(M)`
+- Verified signature format using OpenSSH regression test vectors (`sshsig/testdata/`)
+- See `docs/fido_ssh_notes.md` for full byte-level details
 
 ---
 
