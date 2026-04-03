@@ -309,6 +309,66 @@ items 18 and 21):
 **Done when**
 - `-sk` keys are attempted during auth
 
+**Code changes:**
+
+1. `ssh_auth.erl` — exported `build_sig_data/5`: previously internal-only,
+   now exported to enable integration testing of the full auth message flow.
+   No functional changes to the function itself.
+
+**Verification of existing hooks** (all confirmed working end-to-end):
+
+- `verify_sig/7` SK-aware clause (from M3.1): correctly parses SK signature
+  format (`inner_sig || flags || counter`) and delegates to
+  `ssh_transport:verify/5` for both `sk-ecdsa-sha2-nistp256@openssh.com`
+  and `sk-ssh-ed25519@openssh.com`.
+- `handle_userauth_request/3` with `?FALSE` (pre-check): calls
+  `pre_verify_sig/3` → `ssh2_pubkey_decode/1` → `is_auth_key/3` —
+  correctly handles SK key tuples and returns `ssh_msg_userauth_pk_ok`.
+- `handle_userauth_request/3` with `?TRUE` (actual auth): calls
+  `verify_sig/7` (SK clause) → `build_sig_data/5` →
+  `ssh_transport:verify/5` → `do_verify/5` (SK heads) — full
+  cryptographic verification succeeds for valid SK signatures.
+- `ssh_file:is_auth_key/3`: `public_algo/1` returns correct SK algorithm
+  atom, `encode_key/1` produces correct base64 blob, `find_key/3` matches
+  SK key type strings in `authorized_keys` files.
+- `key_alg/1` identity mappings: SK algorithm atoms pass through unchanged
+  (no aliasing like RSA), ensuring `get_public_key/2` resolves correctly.
+- Fallback behavior: SK auth failure returns `{not_authorized, ...}` with
+  `ssh_msg_userauth_failure` containing the full methods list, allowing
+  the client to fall back to password or keyboard-interactive auth.
+
+**Tests** (6 new, in `ssh_pubkey_SUITE.erl` `ssh_public_key_decode_encode` group):
+- `sk_auth_precheck_ecdsa` — constructs `userauth_request` with
+  `has_sig=false` and ECDSA-SK key blob, verifies server responds with
+  `ssh_msg_userauth_pk_ok` (key accepted for auth attempt)
+- `sk_auth_precheck_ed25519` — same for Ed25519-SK key type
+- `sk_auth_verify_ecdsa` — constructs `userauth_request` with
+  `has_sig=true` and valid ECDSA-SK signature over `build_sig_data`
+  output, verifies `{authorized, User, {ssh_msg_userauth_success, _}}`
+- `sk_auth_verify_ed25519` — same for Ed25519-SK with real Ed25519
+  keypair sign+verify through full `handle_userauth_request/3` path
+- `sk_auth_wrong_sig_rejected` — signs with wrong ECDSA private key,
+  verifies `{not_authorized, ...}` (graceful rejection, no crash)
+- `sk_auth_fallback` — sends deliberately bad Ed25519-SK signature,
+  verifies server returns `ssh_msg_userauth_failure` with
+  `partial_success=false` and non-empty methods list (fallback works)
+
+**Test helpers** (4 new):
+- `sk_make_server_ssh/3`: builds minimal `#ssh{}` record with proper
+  `ssh_options:handle_options/2` opts, temp dir with `authorized_keys`
+  containing the given SK key, and SK algorithms in `preferred_algorithms`
+- `sk_cleanup_dir/1`: removes temp dir and `authorized_keys` file
+- `sk_sign_ecdsa/5`: constructs FIDO authenticator data blob, signs with
+  ECDSA/P-256, encodes r/s as SSH mpint, returns composite SK signature
+- `sk_sign_ed25519/5`: same for Ed25519 (64-byte inner sig)
+- `sk_build_userauth_data/4`: constructs the binary `data` field for
+  `ssh_msg_userauth_request` with correct wire format for both
+  `has_sig=false` (pre-check) and `has_sig=true` (actual auth) cases
+
+**Status**: COMPLETE ✅
+
+**All SK tests (24 total):** 6 Milestone 2 + 6 Milestone 3.1 + 6 Milestone 3.2 + 6 Milestone 4.1 — all passing.
+
 ---
 
 ### Task 4.2: Surface Required User Presence

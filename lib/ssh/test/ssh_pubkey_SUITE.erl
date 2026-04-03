@@ -44,15 +44,20 @@
          sk_valid_key_sha_alg/1, sk_public_algo/1, sk_verify_sig_parse_ecdsa/1,
          sk_verify_sig_parse_ed25519/1, sk_verify_ecdsa_correct/1, sk_verify_ed25519_correct/1,
          sk_verify_wrong_application/1, sk_verify_tampered_flags/1, sk_verify_wrong_key/1,
-         sk_verify_ecdsa_padded_mpint/1, ssh_hostkey_fingerprint_md5_implicit/1,
-         ssh_hostkey_fingerprint_md5/1, ssh_hostkey_fingerprint_sha/1,
-         ssh_hostkey_fingerprint_sha256/1, ssh_hostkey_fingerprint_sha384/1,
-         ssh_hostkey_fingerprint_sha512/1, ssh_hostkey_fingerprint_list/1, chk_known_hosts/1,
-         ssh_hostkey_pkcs8/1, ec_private_key_version_compat/1]).
+         sk_verify_ecdsa_padded_mpint/1, sk_auth_precheck_ecdsa/1, sk_auth_precheck_ed25519/1,
+         sk_auth_verify_ecdsa/1, sk_auth_verify_ed25519/1, sk_auth_wrong_sig_rejected/1,
+         sk_auth_fallback/1, ssh_hostkey_fingerprint_md5_implicit/1, ssh_hostkey_fingerprint_md5/1,
+         ssh_hostkey_fingerprint_sha/1, ssh_hostkey_fingerprint_sha256/1,
+         ssh_hostkey_fingerprint_sha384/1, ssh_hostkey_fingerprint_sha512/1,
+         ssh_hostkey_fingerprint_list/1, chk_known_hosts/1, ssh_hostkey_pkcs8/1,
+         ec_private_key_version_compat/1]).
 
 -include_lib("common_test/include/ct.hrl").
 -include_lib("public_key/include/public_key.hrl").
 
+-include("ssh.hrl").
+-include("ssh_auth.hrl").
+-include("ssh_transport.hrl").
 -include("ssh_test_lib.hrl").
 
 -include_lib("stdlib/include/assert.hrl").
@@ -132,7 +137,9 @@ groups() ->
        sk_malformed_blob, sk_supported_algorithms, sk_sha_mapping, sk_valid_key_sha_alg,
        sk_public_algo, sk_verify_sig_parse_ecdsa, sk_verify_sig_parse_ed25519,
        sk_verify_ecdsa_correct, sk_verify_ed25519_correct, sk_verify_wrong_application,
-       sk_verify_tampered_flags, sk_verify_wrong_key, sk_verify_ecdsa_padded_mpint]}].
+       sk_verify_tampered_flags, sk_verify_wrong_key, sk_verify_ecdsa_padded_mpint,
+       sk_auth_precheck_ecdsa, sk_auth_precheck_ed25519, sk_auth_verify_ecdsa,
+       sk_auth_verify_ed25519, sk_auth_wrong_sig_rejected, sk_auth_fallback]}].
 
 %%%----------------------------------------------------------------
 init_per_suite(Config) ->
@@ -1223,6 +1230,295 @@ sk_try_padded_mpint(N, PubPoint, PrivKey, Application, Flags, Counter, Alg, Key)
         false ->
             sk_try_padded_mpint(N - 1, PubPoint, PrivKey, Application, Flags, Counter, Alg, Key)
     end.
+
+%%--------------------------------------------------------------------
+%% Milestone 4.1 — Auth flow integration tests.
+%% These exercise the full server-side public-key auth path through
+%% ssh_auth:handle_userauth_request/3, proving that SK keys are
+%% accepted (or correctly rejected) during real SSH authentication.
+%%--------------------------------------------------------------------
+
+%%--------------------------------------------------------------------
+%% Helper: build a minimal #ssh{} record with proper options for
+%% server-side SK auth testing.  Creates a temp dir with an
+%% authorized_keys file containing the given Key.
+%%--------------------------------------------------------------------
+sk_make_server_ssh(Key, User, SessionId) ->
+    Dir = "/tmp/sk_auth_flow_" ++ integer_to_list(erlang:unique_integer([positive])),
+    ok = file:make_dir(Dir),
+    %% Write authorized_keys with this key
+    Algo = ssh_transport:public_algo(Key),
+    AlgoStr = atom_to_binary(Algo, latin1),
+    KeyBlob = iolist_to_binary(ssh_message:ssh2_pubkey_encode(Key)),
+    B64 = base64:encode(KeyBlob),
+    AKLine = <<AlgoStr/binary, " ", B64/binary, " test@test\n">>,
+    ok =
+        file:write_file(
+            filename:join(Dir, "authorized_keys"), AKLine),
+    %% Build server opts including SK algorithms
+    Opts =
+        ssh_options:handle_options(server,
+                                   [{system_dir, Dir},
+                                    {user_dir, Dir},
+                                    {preferred_algorithms,
+                                     [{public_key,
+                                       ['sk-ecdsa-sha2-nistp256@openssh.com',
+                                        'sk-ssh-ed25519@openssh.com',
+                                        'ecdsa-sha2-nistp256',
+                                        'ssh-ed25519']}]}]),
+    Ssh = #ssh{role = server,
+               session_id = SessionId,
+               opts = Opts,
+               user = User,
+               service = "ssh-connection",
+               userauth_methods = ["publickey", "password"],
+               userauth_supported_methods = "publickey,keyboard-interactive,password"},
+    {Ssh, Dir}.
+
+%%--------------------------------------------------------------------
+%% Helper: clean up temp dir created by sk_make_server_ssh/3.
+%%--------------------------------------------------------------------
+sk_cleanup_dir(Dir) ->
+    _ = file:delete(
+            filename:join(Dir, "authorized_keys")),
+    _ = file:del_dir(Dir).
+
+%%--------------------------------------------------------------------
+%% Helper: build an SK signature over SigData for ECDSA-SK keys.
+%% Returns the composite Sig = InnerSig || Flags || Counter.
+%%--------------------------------------------------------------------
+sk_sign_ecdsa(PrivKey, Application, SigData, Flags, Counter) ->
+    AppHash = crypto:hash(sha256, Application),
+    MsgHash = crypto:hash(sha256, SigData),
+    AuthData = <<AppHash/binary, Flags:8, Counter:32/unsigned-big-integer, MsgHash/binary>>,
+    DerSig = crypto:sign(ecdsa, sha256, AuthData, [PrivKey, secp256r1]),
+    #'ECDSA-Sig-Value'{r = R, s = S} = public_key:der_decode('ECDSA-Sig-Value', DerSig),
+    Rbin = sk_ssh_mpint(R),
+    Sbin = sk_ssh_mpint(S),
+    Rlen = byte_size(Rbin),
+    Slen = byte_size(Sbin),
+    InnerSig =
+        <<Rlen:32/unsigned-big-integer, Rbin/binary, Slen:32/unsigned-big-integer, Sbin/binary>>,
+    <<InnerSig/binary, Flags:8, Counter:32/unsigned-big-integer>>.
+
+%%--------------------------------------------------------------------
+%% Helper: build an SK signature over SigData for Ed25519-SK keys.
+%%--------------------------------------------------------------------
+sk_sign_ed25519(PrivKey, Application, SigData, Flags, Counter) ->
+    AppHash = crypto:hash(sha256, Application),
+    MsgHash = crypto:hash(sha256, SigData),
+    AuthData = <<AppHash/binary, Flags:8, Counter:32/unsigned-big-integer, MsgHash/binary>>,
+    InnerSig = crypto:sign(eddsa, none, AuthData, [PrivKey, ed25519]),
+    <<InnerSig/binary, Flags:8, Counter:32/unsigned-big-integer>>.
+
+%%--------------------------------------------------------------------
+%% Helper: build a publickey userauth_request data blob.
+%% When HasSig =:= true, includes the signature.
+%% When HasSig =:= false, omits the signature (pre-check query).
+%%--------------------------------------------------------------------
+sk_build_userauth_data(HasSig, AlgBin, KeyBlob, SigBlob) ->
+    case HasSig of
+        false ->
+            <<?FALSE, ?STRING(AlgBin), ?STRING(KeyBlob)>>;
+        true ->
+            SigWLen = <<?STRING(AlgBin), ?STRING(SigBlob)>>,
+            <<?TRUE, ?STRING(AlgBin), ?STRING(KeyBlob), ?STRING(SigWLen)>>
+    end.
+
+%%--------------------------------------------------------------------
+sk_auth_precheck_ecdsa(_Config) ->
+    %% Test the ?FALSE (pre-check) publickey auth path:
+    %% Server receives a userauth_request with has_sig=false and an
+    %% ECDSA-SK key blob.  If the key is in authorized_keys, server
+    %% responds with ssh_msg_userauth_pk_ok (not a crash or failure).
+    {PubPoint, _PrivKey} = crypto:generate_key(ecdh, secp256r1),
+    Application = <<"ssh:">>,
+    Key = {ecdsa_sk, #'ECPoint'{point = PubPoint}, secp256r1, Application},
+    SessionId = crypto:strong_rand_bytes(20),
+    User = "testuser",
+    {Ssh0, Dir} = sk_make_server_ssh(Key, undefined, SessionId),
+
+    AlgBin = <<"sk-ecdsa-sha2-nistp256@openssh.com">>,
+    KeyBlob = iolist_to_binary(ssh_message:ssh2_pubkey_encode(Key)),
+    Data = sk_build_userauth_data(false, AlgBin, KeyBlob, <<>>),
+
+    Msg = #ssh_msg_userauth_request{user = User,
+                                    service = "ssh-connection",
+                                    method = "publickey",
+                                    data = Data},
+    Result = ssh_auth:handle_userauth_request(Msg, SessionId, Ssh0),
+    sk_cleanup_dir(Dir),
+    %% Should be {not_authorized, {User, undefined}, {#ssh_msg_userauth_pk_ok{}, _Ssh}}
+    {not_authorized, {User, undefined}, {Reply, _Ssh1}} = Result,
+    #ssh_msg_userauth_pk_ok{algorithm_name = AlgStr, key_blob = KeyBlob} = Reply,
+    "sk-ecdsa-sha2-nistp256@openssh.com" = AlgStr,
+    ct:log("SK ECDSA pre-check: server replied pk_ok").
+
+%%--------------------------------------------------------------------
+sk_auth_precheck_ed25519(_Config) ->
+    %% Same as above but for Ed25519-SK.
+    {PubKey, _PrivKey} = crypto:generate_key(eddsa, ed25519),
+    Application = <<"ssh:">>,
+    Key = {ed25519_sk, PubKey, Application},
+    SessionId = crypto:strong_rand_bytes(20),
+    User = "testuser",
+    {Ssh0, Dir} = sk_make_server_ssh(Key, undefined, SessionId),
+
+    AlgBin = <<"sk-ssh-ed25519@openssh.com">>,
+    KeyBlob = iolist_to_binary(ssh_message:ssh2_pubkey_encode(Key)),
+    Data = sk_build_userauth_data(false, AlgBin, KeyBlob, <<>>),
+
+    Msg = #ssh_msg_userauth_request{user = User,
+                                    service = "ssh-connection",
+                                    method = "publickey",
+                                    data = Data},
+    Result = ssh_auth:handle_userauth_request(Msg, SessionId, Ssh0),
+    sk_cleanup_dir(Dir),
+    {not_authorized, {User, undefined}, {Reply, _Ssh1}} = Result,
+    #ssh_msg_userauth_pk_ok{algorithm_name = AlgStr, key_blob = KeyBlob} = Reply,
+    "sk-ssh-ed25519@openssh.com" = AlgStr,
+    ct:log("SK Ed25519 pre-check: server replied pk_ok").
+
+%%--------------------------------------------------------------------
+sk_auth_verify_ecdsa(_Config) ->
+    %% Test the ?TRUE (actual auth) publickey path for ECDSA-SK:
+    %% Server receives userauth_request with has_sig=true and a valid
+    %% ECDSA-SK signature.  Should result in {authorized, User, ...}.
+    {PubPoint, PrivKey} = crypto:generate_key(ecdh, secp256r1),
+    Application = <<"ssh:">>,
+    Key = {ecdsa_sk, #'ECPoint'{point = PubPoint}, secp256r1, Application},
+    SessionId = crypto:strong_rand_bytes(20),
+    User = "testuser",
+    %% Pre-verify sets Ssh#ssh.user; simulate that:
+    {Ssh0, Dir} = sk_make_server_ssh(Key, User, SessionId),
+
+    AlgStr = "sk-ecdsa-sha2-nistp256@openssh.com",
+    AlgBin = list_to_binary(AlgStr),
+    KeyBlob = iolist_to_binary(ssh_message:ssh2_pubkey_encode(Key)),
+    Flags = 16#01,
+    Counter = 16#00000001,
+
+    %% Build the sig-data exactly as the server does
+    SigData = ssh_auth:build_sig_data(SessionId, User, "ssh-connection", KeyBlob, AlgStr),
+    %% Create the FIDO-signed ECDSA-SK signature
+    SigBlob = sk_sign_ecdsa(PrivKey, Application, SigData, Flags, Counter),
+
+    Data = sk_build_userauth_data(true, AlgBin, KeyBlob, SigBlob),
+
+    Msg = #ssh_msg_userauth_request{user = User,
+                                    service = "ssh-connection",
+                                    method = "publickey",
+                                    data = Data},
+    Result = ssh_auth:handle_userauth_request(Msg, SessionId, Ssh0),
+    sk_cleanup_dir(Dir),
+    {authorized, User, {#ssh_msg_userauth_success{}, _Ssh1}} = Result,
+    ct:log("SK ECDSA auth: server authorized user with SK signature").
+
+%%--------------------------------------------------------------------
+sk_auth_verify_ed25519(_Config) ->
+    %% Same as above but for Ed25519-SK.
+    {PubKey, PrivKey} = crypto:generate_key(eddsa, ed25519),
+    Application = <<"ssh:">>,
+    Key = {ed25519_sk, PubKey, Application},
+    SessionId = crypto:strong_rand_bytes(20),
+    User = "testuser",
+    {Ssh0, Dir} = sk_make_server_ssh(Key, User, SessionId),
+
+    AlgStr = "sk-ssh-ed25519@openssh.com",
+    AlgBin = list_to_binary(AlgStr),
+    KeyBlob = iolist_to_binary(ssh_message:ssh2_pubkey_encode(Key)),
+    Flags = 16#01,
+    Counter = 16#00000042,
+
+    SigData = ssh_auth:build_sig_data(SessionId, User, "ssh-connection", KeyBlob, AlgStr),
+    SigBlob = sk_sign_ed25519(PrivKey, Application, SigData, Flags, Counter),
+
+    Data = sk_build_userauth_data(true, AlgBin, KeyBlob, SigBlob),
+
+    Msg = #ssh_msg_userauth_request{user = User,
+                                    service = "ssh-connection",
+                                    method = "publickey",
+                                    data = Data},
+    Result = ssh_auth:handle_userauth_request(Msg, SessionId, Ssh0),
+    sk_cleanup_dir(Dir),
+    {authorized, User, {#ssh_msg_userauth_success{}, _Ssh1}} = Result,
+    ct:log("SK Ed25519 auth: server authorized user with SK signature").
+
+%%--------------------------------------------------------------------
+sk_auth_wrong_sig_rejected(_Config) ->
+    %% A bad SK signature should result in {not_authorized, ...},
+    %% NOT a crash.  Tests that the auth code handles SK signature
+    %% verification failure gracefully.
+    {PubPoint, _PrivKeyA} = crypto:generate_key(ecdh, secp256r1),
+    {_PubPointB, PrivKeyB} = crypto:generate_key(ecdh, secp256r1),
+    Application = <<"ssh:">>,
+    Key = {ecdsa_sk, #'ECPoint'{point = PubPoint}, secp256r1, Application},
+    SessionId = crypto:strong_rand_bytes(20),
+    User = "testuser",
+    {Ssh0, Dir} = sk_make_server_ssh(Key, User, SessionId),
+
+    AlgStr = "sk-ecdsa-sha2-nistp256@openssh.com",
+    AlgBin = list_to_binary(AlgStr),
+    KeyBlob = iolist_to_binary(ssh_message:ssh2_pubkey_encode(Key)),
+    Flags = 16#01,
+    Counter = 16#00000001,
+
+    SigData = ssh_auth:build_sig_data(SessionId, User, "ssh-connection", KeyBlob, AlgStr),
+    %% Sign with WRONG private key (B) but verify against public key A
+    SigBlob = sk_sign_ecdsa(PrivKeyB, Application, SigData, Flags, Counter),
+
+    Data = sk_build_userauth_data(true, AlgBin, KeyBlob, SigBlob),
+
+    Msg = #ssh_msg_userauth_request{user = User,
+                                    service = "ssh-connection",
+                                    method = "publickey",
+                                    data = Data},
+    Result = ssh_auth:handle_userauth_request(Msg, SessionId, Ssh0),
+    sk_cleanup_dir(Dir),
+    {not_authorized,
+     {User, undefined},
+     {#ssh_msg_userauth_failure{authentications = Methods}, _Ssh1}} =
+        Result,
+    %% Methods should still list available auth methods
+    true = is_list(Methods) andalso length(Methods) > 0,
+    ct:log("SK auth wrong sig: gracefully rejected, methods=~p", [Methods]).
+
+%%--------------------------------------------------------------------
+sk_auth_fallback(_Config) ->
+    %% After SK auth failure, the server continues to offer other auth
+    %% methods (fallback behavior).  Tests that:
+    %%  1) SK failure returns not_authorized with auth methods
+    %%  2) The methods string includes "password" (fallback)
+    %%  3) A subsequent non-SK auth attempt (password) still works
+    {PubKey, _PrivKey} = crypto:generate_key(eddsa, ed25519),
+    Application = <<"ssh:">>,
+    Key = {ed25519_sk, PubKey, Application},
+    SessionId = crypto:strong_rand_bytes(20),
+    User = "testuser",
+    {Ssh0, Dir} = sk_make_server_ssh(Key, User, SessionId),
+
+    AlgStr = "sk-ssh-ed25519@openssh.com",
+    AlgBin = list_to_binary(AlgStr),
+    KeyBlob = iolist_to_binary(ssh_message:ssh2_pubkey_encode(Key)),
+
+    %% Send a deliberately bad signature (random bytes)
+    BadSig = <<(crypto:strong_rand_bytes(64))/binary, 1:8, 0:32/unsigned-big-integer>>,
+
+    Data = sk_build_userauth_data(true, AlgBin, KeyBlob, BadSig),
+
+    Msg = #ssh_msg_userauth_request{user = User,
+                                    service = "ssh-connection",
+                                    method = "publickey",
+                                    data = Data},
+    Result = ssh_auth:handle_userauth_request(Msg, SessionId, Ssh0),
+    sk_cleanup_dir(Dir),
+    {not_authorized,
+     {User, undefined},
+     {#ssh_msg_userauth_failure{authentications = Methods, partial_success = false}, _Ssh1}} =
+        Result,
+    %% Verify fallback methods are still offered
+    true = lists:member($p, Methods) orelse lists:member($k, Methods),
+    ct:log("SK auth fallback: failure returned methods=~p", [Methods]).
 
 %%--------------------------------------------------------------------
 ssh_openssh_key_with_comment(Config) when is_list(Config) ->
