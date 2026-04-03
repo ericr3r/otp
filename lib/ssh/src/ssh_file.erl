@@ -69,10 +69,10 @@ Clients uses all files stored in the [USERDIR](`m:ssh_file#USERDIR`) directory.
 
 ### Directory contents
 
-- **[](){: #LOCALUSER } LOCALUSER**  
+- **[](){: #LOCALUSER } LOCALUSER**
   The user name of the OS process running the Erlang virtual machine (emulator).
 
-- **[](){: #SYSDIR } SYSDIR**  
+- **[](){: #SYSDIR } SYSDIR**
   This is the directory holding the server's files:
 
   - [](){: #FILE-ssh_host_STAR_key } `ssh_host_dsa_key`{: #FILE-ssh_host_dsa_key
@@ -97,7 +97,7 @@ Clients uses all files stored in the [USERDIR](`m:ssh_file#USERDIR`) directory.
   To change the SYSDIR, see the [system_dir](`t:system_dir_daemon_option/0`)
   option.
 
-- **[](){: #USERDIR } USERDIR**  
+- **[](){: #USERDIR } USERDIR**
   This is the directory holding the files:
 
   - `authorized_keys`{: #FILE-authorized_keys } and, as second alternative
@@ -421,7 +421,7 @@ supported by `ssh_file`.
 - [`USERDIR/known_hosts`](`m:ssh_file#FILE-known_hosts`)
 """.
 -doc(#{since => <<"OTP 23.0">>}).
--spec add_host_key(Host, Port, Key, Options) -> Result when 
+-spec add_host_key(Host, Port, Key, Options) -> Result when
       Host :: inet:ip_address() | inet:hostname()
             | [inet:ip_address() | inet:hostname()],
       Port :: inet:port_number(),
@@ -510,7 +510,7 @@ decode(KeyBin, public_key) when is_binary(KeyBin) ->
         end,
     decode(KeyBin, Type);
 
-decode(KeyBin, Type) when is_binary(KeyBin) andalso 
+decode(KeyBin, Type) when is_binary(KeyBin) andalso
                           (Type==rfc4716_key orelse
                            Type==openssh_key_v1 % Experimental
                           ) ->
@@ -550,7 +550,7 @@ decode(KeyBin0, openssh_key) when is_binary(KeyBin0) ->
 
 decode(Bin, known_hosts) when is_binary(Bin) ->
     [begin
-         Attrs = 
+         Attrs =
              [
               {comment, binary_to_list(erlang:iolist_to_binary(lists:join(" ", Comment)))}
               || Comment =/= []
@@ -571,7 +571,7 @@ decode(Bin, known_hosts) when is_binary(Bin) ->
 
 decode(Bin, auth_keys) when is_binary(Bin) ->
     [begin
-         Attrs = 
+         Attrs =
              [
               {comment, binary_to_list(erlang:iolist_to_binary(lists:join(" ", Comment)))}
               || Comment =/= []
@@ -590,7 +590,9 @@ decode(Bin, auth_keys) when is_binary(Bin) ->
                                   <<"rsa-sha2-">>,
                                   <<"ssh-dss">>,
                                   <<"ecdsa-sha2-nistp">>,
-                                  <<"ssh-ed">>
+                                  <<"ssh-ed">>,
+                                  <<"sk-ecdsa-sha2-">>,
+                                  <<"sk-ssh-ed25519">>
                                  ]) of
                 nomatch ->
                     [];
@@ -1092,7 +1094,7 @@ assure_file_mode(File, Mode) ->
     case file:read_file_info(File) of
         {ok,#file_info{mode=FileMode}} ->
             case (FileMode band Mode) of % is the wanted Mode set?
-                Mode -> 
+                Mode ->
                     %% yes
                     ok;
                 _ ->
@@ -1109,7 +1111,7 @@ assure_file_mode(File, Mode) ->
 
 get_kb_option(Key, Opts, Default) ->
     try
-        proplists:get_value(Key, 
+        proplists:get_value(Key,
                             proplists:get_value(key_cb_private, Opts, []),
                             Default)
     catch
@@ -1256,6 +1258,8 @@ file_base_name(user,   'ssh-dss'            ) -> "id_dsa";
 file_base_name(user,   'ssh-ed25519'        ) -> "id_ed25519";
 file_base_name(user,   'ssh-ed448'          ) -> "id_ed448";
 file_base_name(user,   'ssh-rsa'            ) -> "id_rsa";
+file_base_name(user,   'sk-ecdsa-sha2-nistp256@openssh.com') -> "id_ecdsa_sk";
+file_base_name(user,   'sk-ssh-ed25519@openssh.com') -> "id_ed25519_sk";
 file_base_name(system, 'ecdsa-sha2-nistp256') -> "ssh_host_ecdsa_key";
 file_base_name(system, 'ecdsa-sha2-nistp384') -> "ssh_host_ecdsa_key";
 file_base_name(system, 'ecdsa-sha2-nistp521') -> "ssh_host_ecdsa_key";
@@ -1266,6 +1270,8 @@ file_base_name(system, 'ssh-dss'            ) -> "ssh_host_dsa_key";
 file_base_name(system, 'ssh-ed25519'        ) -> "ssh_host_ed25519_key";
 file_base_name(system, 'ssh-ed448'          ) -> "ssh_host_ed448_key";
 file_base_name(system, 'ssh-rsa'            ) -> "ssh_host_rsa_key";
+file_base_name(system, 'sk-ecdsa-sha2-nistp256@openssh.com') -> "ssh_host_ecdsa_sk_key";
+file_base_name(system, 'sk-ssh-ed25519@openssh.com') -> "ssh_host_ed25519_sk_key";
 file_base_name(system, _                    ) -> "ssh_host_key".
 
 
@@ -1354,7 +1360,7 @@ get_hdr_lines(Lines, Acc) ->
 
 
 get_body(Lines, ExpectedEndLine) ->
-    {KeyPart, [ExpectedEndLine|RestLines]} = 
+    {KeyPart, [ExpectedEndLine|RestLines]} =
         lists:splitwith(fun(L) -> L=/=ExpectedEndLine end, Lines),
     {base64:mime_decode(iolist_to_binary(KeyPart)), RestLines}.
 

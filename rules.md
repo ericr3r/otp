@@ -30,6 +30,19 @@ comparison against OpenSSH behavior at each stage.
 - Prefer pure Erlang where feasible, NIFs only if unavoidable
 - **Do NOT add new public exported functions** — use existing exported functions and add new function heads via pattern matching to support the new FIDO key types
 - **Test coverage must not regress** — for every modified module (`ssh_message`, `ssh_transport`, `ssh_auth`, `ssh_file`), test coverage after changes must match or exceed the coverage baseline before changes.  Measure with the existing `ssh.cover` / `ssh_all.cover` configurations and Common Test's coverage support.  New code paths (SK-specific function heads, FIDO blob construction, etc.) must be exercised by at least Tier 1 or Tier 2 tests.
+- **Do NOT reformat existing code** — follow the OTP contributing guidelines
+  (`CONTRIBUTING.md`):
+  - Match the coding and indentation style of the surrounding code.
+  - 4-space indentation, spaces only (no tabs in Erlang source).
+  - Do not fix preexisting whitespace errors in otherwise untouched lines.
+  - Run `git diff --check` before committing to catch whitespace errors.
+  - Diffs must be minimal: only the new function heads, new list entries, or
+    new clauses should appear.  If a diff touches hundreds of lines in a file
+    where only a handful were added, the change must be redone.
+  - Do NOT use auto-formatters (erlfmt, ELP format, editor reformat-on-save)
+    on OTP source files — the upstream project does not use one and
+    auto-formatting rewrites the entire file, creating noise that obscures
+    the real change and will be rejected by reviewers.
 
 ---
 
@@ -99,31 +112,88 @@ Each milestone is broken into atomic tasks below.
 
 ## Milestone 2: Public Key Parsing
 
-### Task 2.1: Add Key Type Recognition
-- Accept 2 key types (each has a short form and full form):
-  - **ECDSA-SK**: `ecdsa-sk` or `sk-ecdsa-sha2-nistp256@openssh.com`
-  - **Ed25519-SK**: `ed25519-sk` or `sk-ssh-ed25519@openssh.com`
-- No functional behavior yet
+### Task 2.1: Decode and Encode SK Public Keys
+
+Add support for decoding and encoding FIDO public key blobs in wire format.
+Public key blobs contain only the key material and application string — flags
+and key handle are private-key-only fields and are out of scope here.
+
+**Wire-format key type names** (these are what appear on the wire, in
+`authorized_keys` files, and in the code — the short forms `ecdsa-sk` /
+`ed25519-sk` are `ssh-keygen` CLI aliases and never appear in protocol
+messages):
+- `sk-ecdsa-sha2-nistp256@openssh.com` (34 bytes)
+- `sk-ssh-ed25519@openssh.com` (26 bytes)
+
+**Internal term representation** (tagged tuples, no OID machinery):
+- `{ecdsa_sk, #'ECPoint'{point = Q}, secp256r1, Application}`
+- `{ed25519_sk, PubKey, Application}`
+
+The `Application` field (typically `<<"ssh:">>``) **must be preserved** — it is
+required at verification time to compute `SHA-256(application)` for the FIDO
+authenticator data blob.
+
+**Code changes** (all in `ssh_message.erl`, see `docs/otp_ssh_touchpoints.md`
+items 1–2 for exact line numbers and code):
+
+1. `ssh2_pubkey_decode2/1` — add 2 new function heads **before** the catch-all
+   at L698 that would otherwise consume SK blobs and crash in
+   `ssh_curvename2oid/1`
+2. `ssh2_pubkey_encode/1` — add 2 new function heads that produce the correct
+   wire-format binary from the SK key tuples
 
 **Done when**
-- Both key types are recognized without crashing
-- Unknown fields are preserved (application field parsed but discarded)
+- `ssh2_pubkey_decode2(Blob)` returns the correct tagged tuple for both key
+  types, with `Application` captured
+- `ssh2_pubkey_encode(Term)` produces a binary identical to the input blob
+  (byte-for-byte round-trip)
+- Existing non-SK key decode/encode is unaffected (run `ssh_basic_SUITE` to
+  confirm zero regressions)
 
-**Status**: NOT STARTED
+**Status**: COMPLETE ✅
+- Added 2 new `ssh2_pubkey_decode2/1` heads in `ssh_message.erl` (before the
+  catch-all) for ECDSA-SK and Ed25519-SK wire format blobs
+- Added 2 new `ssh2_pubkey_encode/1` heads in `ssh_message.erl` (before the
+  RSA head) producing correct wire-format binaries
+- Both files compile cleanly with the bootstrap Erlang 28
 
 ---
 
-### Task 2.2: Parse FIDO Public Key Fields
-- Parse:
-  - Application string
-  - Flags
-  - Key handle
-- Store in structured Erlang term
+### Task 2.2: Recognize SK Keys in `authorized_keys` and File Paths
+
+Make SK public keys discoverable by the server's key-loading infrastructure so
+that SK entries in `authorized_keys` files are not silently dropped.
+
+**Code changes** (all in `ssh_file.erl`, see `docs/otp_ssh_touchpoints.md`
+items 18 and 21):
+
+1. `decode(Bin, auth_keys)` (L591–596) — add `<<"sk-ecdsa-sha2-">>` and
+   `<<"sk-ssh-ed25519">>` to the `binary:match/2` prefix list.  Without this,
+   SK key lines match `nomatch` and are silently skipped.
+2. `file_base_name/2` (L1249–1269) — add 4 new heads mapping the SK algorithm
+   atoms to OpenSSH file names:
+   - `(user, 'sk-ecdsa-sha2-nistp256@openssh.com')` → `"id_ecdsa_sk"`
+   - `(user, 'sk-ssh-ed25519@openssh.com')` → `"id_ed25519_sk"`
+   - `(system, 'sk-ecdsa-sha2-nistp256@openssh.com')` → `"ssh_host_ecdsa_sk_key"`
+   - `(system, 'sk-ssh-ed25519@openssh.com')` → `"ssh_host_ed25519_sk_key"`
+
+   Insert before the `system` catch-all `(system, _) -> "ssh_host_key"` at
+   L1269.
 
 **Done when**
-- Parsed key can round-trip without loss
+- Parsing an `authorized_keys` file containing SK key lines finds and decodes
+  those keys (not silently dropped)
+- Parsing a mixed `authorized_keys` file with both SK and non-SK keys returns
+  all keys
+- `file_base_name` returns correct filenames for both SK key types
+- Existing non-SK `authorized_keys` parsing is unaffected
 
-**Status**: NOT STARTED
+**Status**: COMPLETE ✅
+- Added `<<"sk-ecdsa-sha2-">>` and `<<"sk-ssh-ed25519">>` to the
+  `binary:match/2` prefix list in `decode(Bin, auth_keys)` in `ssh_file.erl`
+- Added 4 new `file_base_name/2` heads in `ssh_file.erl` (before the system
+  catch-all) mapping SK algorithm atoms to OpenSSH file names
+- Both files compile cleanly with the bootstrap Erlang 28
 
 ---
 

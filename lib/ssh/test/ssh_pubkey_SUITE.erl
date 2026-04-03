@@ -78,6 +78,12 @@
          ssh1_auth_keys/1,
          ssh_openssh_key_with_comment/1,
          ssh_openssh_key_long_header/1,
+         sk_ecdsa_pubkey_encode_decode/1,
+         sk_ed25519_pubkey_encode_decode/1,
+         sk_auth_keys/1,
+         sk_auth_keys_mixed/1,
+         sk_file_base_name/1,
+         sk_malformed_blob/1,
 
          ssh_hostkey_fingerprint_md5_implicit/1,
          ssh_hostkey_fingerprint_md5/1,
@@ -172,7 +178,13 @@ groups() ->
        ssh_known_hosts, %% ssh1_known_hosts,
        ssh_auth_keys, %% ssh1_auth_keys,
        ssh_openssh_key_with_comment,
-       ssh_openssh_key_long_header]}
+       ssh_openssh_key_long_header,
+       sk_ecdsa_pubkey_encode_decode,
+       sk_ed25519_pubkey_encode_decode,
+       sk_auth_keys,
+       sk_auth_keys_mixed,
+       sk_file_base_name,
+       sk_malformed_blob]}
     ].
 
 
@@ -780,6 +792,134 @@ ssh1_auth_keys(Config) when is_list(Config) ->
 
     Encoded = ssh_file:encode(Decoded, auth_keys),
     Decoded = ssh_file:decode(Encoded, auth_keys).
+
+%%--------------------------------------------------------------------
+%%--------------------------------------------------------------------
+%% FIDO/SK key types — Tier 1 synthetic tests (no hardware required).
+%% Constructs key blobs programmatically and verifies encode/decode
+%% round-trips and authorized_keys parsing.
+%%--------------------------------------------------------------------
+sk_ecdsa_pubkey_encode_decode(_Config) ->
+    %% Synthetic ECDSA-SK public key: 65-byte uncompressed EC point on P-256
+    Q = <<4, (crypto:strong_rand_bytes(64))/binary>>,
+    Application = <<"ssh:">>,
+    Key = {ecdsa_sk, #'ECPoint'{point = Q}, secp256r1, Application},
+    Blob = ssh_message:ssh2_pubkey_encode(Key),
+    Key = ssh_message:ssh2_pubkey_decode(Blob),
+    ct:log("ECDSA-SK round-trip OK: ~p bytes", [byte_size(Blob)]).
+
+%%--------------------------------------------------------------------
+sk_ed25519_pubkey_encode_decode(_Config) ->
+    %% Synthetic Ed25519-SK public key: 32-byte raw public key
+    PubKey = crypto:strong_rand_bytes(32),
+    Application = <<"ssh:">>,
+    Key = {ed25519_sk, PubKey, Application},
+    Blob = ssh_message:ssh2_pubkey_encode(Key),
+    Key = ssh_message:ssh2_pubkey_decode(Blob),
+    ct:log("Ed25519-SK round-trip OK: ~p bytes", [byte_size(Blob)]).
+
+%%--------------------------------------------------------------------
+sk_auth_keys(_Config) ->
+    %% Build synthetic authorized_keys lines for both SK key types
+    %% and verify ssh_file:decode/2 parses them correctly.
+    EcQ = <<4, (crypto:strong_rand_bytes(64))/binary>>,
+    EcApp = <<"ssh:">>,
+    EcKey = {ecdsa_sk, #'ECPoint'{point = EcQ}, secp256r1, EcApp},
+    EcBlob = ssh_message:ssh2_pubkey_encode(EcKey),
+    EcLine =
+        <<"sk-ecdsa-sha2-nistp256@openssh.com ",
+          (base64:encode(EcBlob))/binary,
+          " sk-ec-comment\n">>,
+
+    EdPub = crypto:strong_rand_bytes(32),
+    EdApp = <<"ssh:">>,
+    EdKey = {ed25519_sk, EdPub, EdApp},
+    EdBlob = ssh_message:ssh2_pubkey_encode(EdKey),
+    EdLine =
+        <<"sk-ssh-ed25519@openssh.com ", (base64:encode(EdBlob))/binary, " sk-ed-comment\n">>,
+
+    AuthKeysBin = <<EcLine/binary, EdLine/binary>>,
+    [{EcKey, EcAttrs}, {EdKey, EdAttrs}] = ssh_file:decode(AuthKeysBin, auth_keys),
+
+    "sk-ec-comment" = proplists:get_value(comment, EcAttrs),
+    "sk-ed-comment" = proplists:get_value(comment, EdAttrs),
+    ct:log("SK auth_keys decode OK").
+
+%%--------------------------------------------------------------------
+sk_auth_keys_mixed(_Config) ->
+    %% Verify that a mixed authorized_keys file with both SK and
+    %% non-SK keys returns all keys (SK keys not silently dropped).
+    RsaE = 65537,
+    RsaN = 7829278462133507,
+    RsaKey = #'RSAPublicKey'{modulus = RsaN, publicExponent = RsaE},
+    RsaBlob = ssh_message:ssh2_pubkey_encode(RsaKey),
+    RsaLine = <<"ssh-rsa ", (base64:encode(RsaBlob))/binary, " rsa-comment\n">>,
+
+    EdPub = crypto:strong_rand_bytes(32),
+    EdApp = <<"ssh:">>,
+    EdKey = {ed25519_sk, EdPub, EdApp},
+    EdBlob = ssh_message:ssh2_pubkey_encode(EdKey),
+    EdLine =
+        <<"sk-ssh-ed25519@openssh.com ", (base64:encode(EdBlob))/binary, " ed-sk-comment\n">>,
+
+    AuthKeysBin = <<RsaLine/binary, EdLine/binary>>,
+    [{RsaKey, RsaAttrs}, {EdKey, EdAttrs}] = ssh_file:decode(AuthKeysBin, auth_keys),
+
+    "rsa-comment" = proplists:get_value(comment, RsaAttrs),
+    "ed-sk-comment" = proplists:get_value(comment, EdAttrs),
+    ct:log("Mixed SK + non-SK auth_keys decode OK: 2 keys found").
+
+%%--------------------------------------------------------------------
+sk_file_base_name(_Config) ->
+    %% Verify file_base_name/2 returns correct filenames for SK keys.
+    %% Uses ssh_test_lib:file_base_name/2 (exported mirror of ssh_file).
+    "id_ecdsa_sk" = ssh_test_lib:file_base_name(user, 'sk-ecdsa-sha2-nistp256@openssh.com'),
+    "id_ed25519_sk" = ssh_test_lib:file_base_name(user, 'sk-ssh-ed25519@openssh.com'),
+    "ssh_host_ecdsa_sk_key" =
+        ssh_test_lib:file_base_name(system, 'sk-ecdsa-sha2-nistp256@openssh.com'),
+    "ssh_host_ed25519_sk_key" =
+        ssh_test_lib:file_base_name(system, 'sk-ssh-ed25519@openssh.com'),
+    ct:log("SK file_base_name mappings OK").
+
+%%--------------------------------------------------------------------
+sk_malformed_blob(_Config) ->
+    %% Truncated ECDSA-SK blob: correct type tag but missing
+    %% application field.  ssh2_pubkey_decode should crash (no
+    %% graceful error tuple — OTP style).
+    Q = <<4, (crypto:strong_rand_bytes(64))/binary>>,
+    TruncatedBlob =
+        <<34:32/unsigned-big-integer,
+          "sk-ecdsa-sha2-nistp256@openssh.com",
+          8:32/unsigned-big-integer,
+          "nistp256",
+          65:32/unsigned-big-integer,
+          Q/binary>>,
+    %% No application field — decode must fail
+    ok =
+        try ssh_message:ssh2_pubkey_decode(TruncatedBlob) of
+            _ ->
+                decode_should_have_failed
+        catch
+            error:_ ->
+                ok
+        end,
+
+    %% Truncated Ed25519-SK blob: missing application field
+    PubKey = crypto:strong_rand_bytes(32),
+    TruncatedEd =
+        <<26:32/unsigned-big-integer,
+          "sk-ssh-ed25519@openssh.com",
+          32:32/unsigned-big-integer,
+          PubKey/binary>>,
+    ok =
+        try ssh_message:ssh2_pubkey_decode(TruncatedEd) of
+            _ ->
+                decode_should_have_failed
+        catch
+            error:_ ->
+                ok
+        end,
+    ct:log("SK malformed blob handling OK").
 
 %%--------------------------------------------------------------------
 ssh_openssh_key_with_comment(Config) when is_list(Config) ->
