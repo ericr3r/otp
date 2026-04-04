@@ -54,6 +54,9 @@
          sk_regression_non_sk_auth/1, sk_verify_both_key_types_sequential/1,
          sk_verify_zero_counter/1, sk_verify_max_counter/1, sk_verify_all_flags/1,
          sk_mixed_auth_sk_then_standard_fallback/1, sk_option_validate_fido_fun/1,
+         sk_fixture_ecdsa_decode/1, sk_fixture_ed25519_decode/1, sk_fixture_ecdsa_roundtrip/1,
+         sk_fixture_ed25519_roundtrip/1, sk_fixture_auth_keys_single/1,
+         sk_fixture_auth_keys_mixed/1, sk_fixture_malformed_truncated/1,
          ssh_hostkey_fingerprint_md5_implicit/1, ssh_hostkey_fingerprint_md5/1,
          ssh_hostkey_fingerprint_sha/1, ssh_hostkey_fingerprint_sha256/1,
          ssh_hostkey_fingerprint_sha384/1, ssh_hostkey_fingerprint_sha512/1,
@@ -154,7 +157,9 @@ groups() ->
        sk_regression_non_sk_pubkey_decode, sk_regression_non_sk_verify,
        sk_regression_non_sk_auth, sk_verify_both_key_types_sequential, sk_verify_zero_counter,
        sk_verify_max_counter, sk_verify_all_flags, sk_mixed_auth_sk_then_standard_fallback,
-       sk_option_validate_fido_fun]}].
+       sk_option_validate_fido_fun, sk_fixture_ecdsa_decode, sk_fixture_ed25519_decode,
+       sk_fixture_ecdsa_roundtrip, sk_fixture_ed25519_roundtrip, sk_fixture_auth_keys_single,
+       sk_fixture_auth_keys_mixed, sk_fixture_malformed_truncated]}].
 
 %%%----------------------------------------------------------------
 init_per_suite(Config) ->
@@ -2208,6 +2213,201 @@ sk_option_validate_fido_fun(_Config) ->
         ssh_options:handle_options(server, [{system_dir, "/tmp"}, {sk_fido_verify_fun, true}]),
 
     ct:log("M6.1 option_validate_fido_fun: all validation checks OK").
+
+%%--------------------------------------------------------------------
+%%--------------------------------------------------------------------
+%% Milestone 6.2: Tier 2 — Fixture-Based Parsing Tests
+%%
+%% These tests use real OpenSSH-generated SK public key fixtures
+%% (from regress/unittests/sshkey/testdata/) rather than synthetic
+%% random keys, validating interop with known-good key material.
+%%--------------------------------------------------------------------
+
+sk_fixture_data_dir(Config) ->
+    filename:join(
+        proplists:get_value(data_dir, Config), "sk_fixtures").
+
+sk_fixture_read_pub(Config, FileName) ->
+    Dir = sk_fixture_data_dir(Config),
+    Path = filename:join(Dir, FileName),
+    {ok, Bin} = file:read_file(Path),
+    Bin.
+
+sk_fixture_ecdsa_decode(Config) ->
+    %% Decode the real OpenSSH ECDSA-SK public key fixture and verify
+    %% field values match expected constants.
+    Raw = sk_fixture_read_pub(Config, "ecdsa_sk1.pub"),
+    [{Key, Attrs}] = ssh_file:decode(Raw, openssh_key),
+    ct:log("M6.2 fixture ECDSA-SK decoded key: ~p", [Key]),
+    ct:log("M6.2 fixture ECDSA-SK attrs: ~p", [Attrs]),
+
+    %% Verify key structure
+    {ecdsa_sk, #'ECPoint'{point = Q}, secp256r1, Application} = Key,
+
+    %% EC point must be 65 bytes (uncompressed P-256)
+    65 = byte_size(Q),
+    %% First byte of uncompressed point is 0x04
+    <<4, _:64/binary>> = Q,
+
+    %% Application must be <<"ssh:">>
+    <<"ssh:">> = Application,
+
+    %% Comment from the fixture
+    [{comment, "ECDSA-SK test key #1"}] = Attrs,
+
+    ct:log("M6.2 fixture_ecdsa_decode: OK — Q=~p bytes, app=~p", [byte_size(Q), Application]).
+
+sk_fixture_ed25519_decode(Config) ->
+    %% Decode the real OpenSSH Ed25519-SK public key fixture and verify
+    %% field values match expected constants.
+    Raw = sk_fixture_read_pub(Config, "ed25519_sk1.pub"),
+    [{Key, Attrs}] = ssh_file:decode(Raw, openssh_key),
+    ct:log("M6.2 fixture Ed25519-SK decoded key: ~p", [Key]),
+    ct:log("M6.2 fixture Ed25519-SK attrs: ~p", [Attrs]),
+
+    %% Verify key structure
+    {ed25519_sk, PubKey, Application} = Key,
+
+    %% Ed25519 public key must be 32 bytes
+    32 = byte_size(PubKey),
+
+    %% Application must be <<"ssh:">>
+    <<"ssh:">> = Application,
+
+    %% Comment from the fixture
+    [{comment, "ED25519-SK test key #1"}] = Attrs,
+
+    ct:log("M6.2 fixture_ed25519_decode: OK — PubKey=~p bytes, app=~p",
+           [byte_size(PubKey), Application]).
+
+sk_fixture_ecdsa_roundtrip(Config) ->
+    %% Decode the ECDSA-SK fixture, re-encode the key blob, and verify
+    %% byte-for-byte match with the original base64-encoded blob.
+    Raw = sk_fixture_read_pub(Config, "ecdsa_sk1.pub"),
+
+    %% Extract the original base64 blob from the authorized_keys line
+    [_AlgName, OrigB64 | _Rest] =
+        string:split(
+            string:trim(Raw), " ", all),
+    OrigBlob = base64:decode(OrigB64),
+
+    %% Decode and re-encode
+    [{Key, _Attrs}] = ssh_file:decode(Raw, openssh_key),
+    ReEncoded = iolist_to_binary(ssh_message:ssh2_pubkey_encode(Key)),
+
+    %% Byte-for-byte match
+    OrigBlob = ReEncoded,
+
+    ct:log("M6.2 fixture_ecdsa_roundtrip: OK — ~p bytes match", [byte_size(OrigBlob)]).
+
+sk_fixture_ed25519_roundtrip(Config) ->
+    %% Decode the Ed25519-SK fixture, re-encode the key blob, and verify
+    %% byte-for-byte match with the original base64-encoded blob.
+    Raw = sk_fixture_read_pub(Config, "ed25519_sk1.pub"),
+
+    %% Extract the original base64 blob from the authorized_keys line
+    [_AlgName, OrigB64 | _Rest] =
+        string:split(
+            string:trim(Raw), " ", all),
+    OrigBlob = base64:decode(OrigB64),
+
+    %% Decode and re-encode
+    [{Key, _Attrs}] = ssh_file:decode(Raw, openssh_key),
+    ReEncoded = iolist_to_binary(ssh_message:ssh2_pubkey_encode(Key)),
+
+    %% Byte-for-byte match
+    OrigBlob = ReEncoded,
+
+    ct:log("M6.2 fixture_ed25519_roundtrip: OK — ~p bytes match", [byte_size(OrigBlob)]).
+
+sk_fixture_auth_keys_single(Config) ->
+    %% Parse each fixture as a single-line authorized_keys entry and
+    %% verify the SK key is found.
+    EcRaw = sk_fixture_read_pub(Config, "ecdsa_sk1.pub"),
+    EdRaw = sk_fixture_read_pub(Config, "ed25519_sk1.pub"),
+
+    %% ECDSA-SK
+    [{EcKey, _EcAttrs}] = ssh_file:decode(EcRaw, auth_keys),
+    {ecdsa_sk, _, secp256r1, <<"ssh:">>} = EcKey,
+
+    %% Ed25519-SK
+    [{EdKey, _EdAttrs}] = ssh_file:decode(EdRaw, auth_keys),
+    {ed25519_sk, _, <<"ssh:">>} = EdKey,
+
+    ct:log("M6.2 fixture_auth_keys_single: both SK keys found").
+
+sk_fixture_auth_keys_mixed(Config) ->
+    %% Build an authorized_keys file mixing fixture SK keys with a
+    %% standard RSA key.  Verify all keys are found (SK not dropped).
+    EcRaw = string:trim(sk_fixture_read_pub(Config, "ecdsa_sk1.pub")),
+    EdRaw = string:trim(sk_fixture_read_pub(Config, "ed25519_sk1.pub")),
+
+    %% Build a synthetic RSA line
+    RsaE = 65537,
+    RsaN = 7829278462133507,
+    RsaKey = #'RSAPublicKey'{modulus = RsaN, publicExponent = RsaE},
+    RsaBlob = iolist_to_binary(ssh_message:ssh2_pubkey_encode(RsaKey)),
+    RsaLine = <<"ssh-rsa ", (base64:encode(RsaBlob))/binary, " rsa-comment">>,
+
+    %% Combine: RSA, ECDSA-SK, Ed25519-SK
+    Combined = <<RsaLine/binary, "\n", EcRaw/binary, "\n", EdRaw/binary, "\n">>,
+    Decoded = ssh_file:decode(Combined, auth_keys),
+
+    %% Expect exactly 3 keys
+    3 = length(Decoded),
+
+    %% Verify types
+    Types = [element(1, K) || {K, _} <- Decoded],
+    true = lists:member('RSAPublicKey', Types),
+    true = lists:member(ecdsa_sk, Types),
+    true = lists:member(ed25519_sk, Types),
+
+    ct:log("M6.2 fixture_auth_keys_mixed: all 3 keys found, types=~p", [Types]).
+
+sk_fixture_malformed_truncated(_Config) ->
+    %% Construct a truncated ECDSA-SK blob based on the real fixture's
+    %% type tag and curve, but with the application field cut off.
+    %% Verify decode fails (crashes, OTP style) rather than silently
+    %% returning garbage.
+    TypeTag = <<"sk-ecdsa-sha2-nistp256@openssh.com">>,
+    Curve = <<"nistp256">>,
+    Q = <<4, (crypto:strong_rand_bytes(64))/binary>>,
+    TruncatedBlob =
+        <<(byte_size(TypeTag)):32/unsigned-big-integer,
+          TypeTag/binary,
+          (byte_size(Curve)):32/unsigned-big-integer,
+          Curve/binary,
+          (byte_size(Q)):32/unsigned-big-integer,
+          Q/binary>>,
+    %% Missing: application string → truncated
+    ok =
+        try ssh_message:ssh2_pubkey_decode(TruncatedBlob) of
+            _ ->
+                decode_should_have_failed
+        catch
+            error:_ ->
+                ok
+        end,
+
+    %% Same for Ed25519-SK
+    EdTypeTag = <<"sk-ssh-ed25519@openssh.com">>,
+    EdPub = crypto:strong_rand_bytes(32),
+    TruncatedEd =
+        <<(byte_size(EdTypeTag)):32/unsigned-big-integer,
+          EdTypeTag/binary,
+          (byte_size(EdPub)):32/unsigned-big-integer,
+          EdPub/binary>>,
+    %% Missing: application string → truncated
+    ok =
+        try ssh_message:ssh2_pubkey_decode(TruncatedEd) of
+            _ ->
+                decode_should_have_failed
+        catch
+            error:_ ->
+                ok
+        end,
+
+    ct:log("M6.2 fixture_malformed_truncated: truncated blobs rejected OK").
 
 %%--------------------------------------------------------------------
 ssh_openssh_key_with_comment(Config) when is_list(Config) ->
