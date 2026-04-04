@@ -35,14 +35,22 @@
 
 -include("ssh.hrl").
 
--export([start_link/2, stop_listener/1, stop_system/1, start_system/2, start_connection/4,
-         get_daemon_listen_address/1, addresses/1, get_options/2, get_acceptor_options/1,
-         restart_acceptor/2]).
+-export([start_link/2,
+         stop_listener/1,
+	 stop_system/1,
+         start_system/2,
+         start_connection/4,
+	 get_daemon_listen_address/1,
+         addresses/1,
+         get_options/2,
+         get_acceptor_options/1,
+         restart_acceptor/2
+        ]).
+
 %% Supervisor callback
 -export([init/1]).
 
 -behaviour(ssh_dbg).
-
 -export([ssh_dbg_trace_points/0, ssh_dbg_flags/1, ssh_dbg_on/1, ssh_dbg_off/1,
          ssh_dbg_format/2]).
 
@@ -59,7 +67,8 @@ start_system(Address0, Options) ->
                                    #{id       => {?MODULE,Address0},
                                      start    => {?MODULE, start_link, [Address0, Options]},
                                      restart  => temporary,
-                                     type => supervisor})
+                                     type     => supervisor
+                                    })
     end.
 
 %%%----------------------------------------------------------------
@@ -74,7 +83,8 @@ stop_listener(SystemSup) when is_pid(SystemSup) ->
 
 %%%----------------------------------------------------------------
 get_daemon_listen_address(SystemSup) ->
-    try lookup(ssh_acceptor_sup, SystemSup) of
+    try lookup(ssh_acceptor_sup, SystemSup)
+    of
         {{ssh_acceptor_sup,Address}, _, _, _} ->
             {ok, Address};
         _ ->
@@ -103,11 +113,13 @@ do_start_connection(Role, SupPid, Significant, Socket, Options0) ->
     Options = ?PUT_INTERNAL_OPT([{user_pid, self()}], Options0),
     case supervisor:start_child(SupPid,
                                 #{id          => Id,
-                                  start =>
-                                      {ssh_connection_sup, start_link, [Role, Id, Socket, Options]},
+                                  start       => {ssh_connection_sup, start_link,
+                                                  [Role,Id,Socket,Options]
+                                                 },
                                   restart     => temporary,
                                   significant => Significant,
-                                  type => supervisor})
+                                  type        => supervisor
+                                 })
     of
         {ok,_ConnectionSupPid} ->
             try
@@ -136,11 +148,9 @@ start_link(Address, Options) ->
     supervisor:start_link(?MODULE, [Address, Options]).
 
 %%%----------------------------------------------------------------
-addresses(#address{address = Address,
-                   port = Port,
-                   profile = Profile}) ->
-    [{SysSup, A}
-     || {{ssh_system_sup, A}, SysSup, supervisor, _} <- supervisor:which_children(sshd_sup),
+addresses(#address{address=Address, port=Port, profile=Profile}) ->
+    [{SysSup,A} || {{ssh_system_sup,A},SysSup,supervisor,_} <-
+                     supervisor:which_children(sshd_sup),
                  Address == any orelse A#address.address == Address,
                  Port == any    orelse A#address.port == Port,
                  Profile == any orelse A#address.profile == Profile].
@@ -158,7 +168,9 @@ get_acceptor_options(SysPid) ->
 restart_acceptor(SysPid, Options0) ->
     case get_daemon_listen_address(SysPid) of
         {ok,Address} ->
-            try stop_listener(SysPid) of
+            try
+                stop_listener(SysPid)
+            of
                 ok ->
                     Options = refresh_lsocket(Options0),
                     start_acceptor(SysPid, Address, Options)
@@ -176,11 +188,11 @@ restart_acceptor(SysPid, Options0) ->
 %%%=========================================================================
 init([Address, Options]) ->
     ssh_lib:set_label(server, system_sup),
-    SupFlags =
-        #{strategy => one_for_one,
+    SupFlags = #{strategy      => one_for_one,
                  auto_shutdown => all_significant,
                  intensity =>    0,
-          period => 3600},
+                 period    => 3600
+                },
     ChildSpecs =
         case is_socket_server(Options) of
             false ->
@@ -196,7 +208,8 @@ init([Address, Options]) ->
 
 %% A macro to keep get_options/2 and acceptor_sup_child_spec/3 synchronized
 -define(accsup_start(SysSup,Addr,Opts),
-        {ssh_acceptor_sup, start_link, [SysSup, Addr, Opts]}).
+        {ssh_acceptor_sup, start_link, [SysSup,Addr,Opts]}
+       ).
 
 get_options(Sup, Address = #address{}) ->
     %% Lookup the Option parameter in the running ssh_acceptor_sup:
@@ -205,8 +218,7 @@ get_options(Sup, Address = #address{}) ->
             supervisor:get_childspec(Sup, {ssh_acceptor_sup,Address}),
         {ok, Options}
     catch
-        _:_ ->
-            {error, not_found}
+        _:_ -> {error,not_found}
     end.
 
 %%%=========================================================================
@@ -219,7 +231,8 @@ acceptor_sup_child_spec(SysSup, Address, Options) ->
       start    => ?accsup_start(SysSup, Address, Options),
       restart  => transient,
       significant => true,
-      type => supervisor}.
+      type     => supervisor
+     }.
 
 lookup(SupModule, SystemSup) ->
     lists:keyfind([SupModule], 4, supervisor:which_children(SystemSup)).
@@ -238,10 +251,8 @@ find_system_sup(Address0) ->
     case addresses(Address0) of
         [{SysSupPid,Address}] ->
             {ok,{SysSupPid,Address}};
-        [] ->
-            {error, not_found};
-        [_, _ | _] ->
-            {error, ambiguous}
+        [] -> {error,not_found};
+        [_,_|_] -> {error,ambiguous}
     end.
 
 is_socket_server(Options) ->
@@ -266,7 +277,8 @@ refresh_lsocket(Options0) ->
         ?GET_INTERNAL_OPT(lsocket, Options0, lsocket_undefined),
     case ssh_lsocket:get_lsocket(LHost, LPort, Options0) of
         {ok, {LSocketProvider, LSocket}} ->
-            {_Host, _Port, Options} = ssh:update_lsocket(LSocket, LSocketProvider, Options0),
+            {_Host, _Port, Options} =
+                ssh:update_lsocket(LSocket, LSocketProvider, Options0),
             Options;
         Error = {error, _} ->
             Error
@@ -277,11 +289,9 @@ refresh_lsocket(Options0) ->
 %%%# Tracing
 %%%#
 
-ssh_dbg_trace_points() ->
-    [connections].
+ssh_dbg_trace_points() -> [connections].
 
-ssh_dbg_flags(connections) ->
-    [c].
+ssh_dbg_flags(connections) -> [c].
 
 ssh_dbg_on(connections) ->
     dbg:tpl(?MODULE, stop_listener, 1, x),
@@ -292,11 +302,11 @@ ssh_dbg_off(connections) ->
     dbg:ctpl(?MODULE, start_acceptor, 3).
 
 ssh_dbg_format(Tracepoint, Event = {call, {?MODULE, Function, Args}}) ->
-    [io_lib:format("~w:~w/~w> ~s",
-                   [?MODULE, Function, length(Args)] ++ ssh_dbg_comment(Tracepoint, Event))];
+    [io_lib:format("~w:~w/~w> ~s", [?MODULE, Function, length(Args)] ++
+                       ssh_dbg_comment(Tracepoint, Event))];
 ssh_dbg_format(Tracepoint, Event = {return_from, {?MODULE,Function,Arity}, Ret}) ->
-    [io_lib:format("~w:~w/~w returned ~W> ~s",
-                   [?MODULE, Function, Arity, Ret, 3] ++ ssh_dbg_comment(Tracepoint, Event))].
+    [io_lib:format("~w:~w/~w returned ~W> ~s", [?MODULE, Function, Arity, Ret, 3] ++
+                  ssh_dbg_comment(Tracepoint, Event))].
 
 ssh_dbg_comment(_, _) ->
     [""].
