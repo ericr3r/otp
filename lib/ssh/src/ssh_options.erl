@@ -23,8 +23,7 @@
 %%
 
 -module(ssh_options).
-
--moduledoc(false).
+-moduledoc false.
 
 -include("ssh.hrl").
 -include_lib("kernel/include/file.hrl").
@@ -169,22 +168,19 @@ merge_options(Role, NewPropList, Opts0) when is_list(NewPropList),
 %%% Initialize the options
 %%%
 
--spec handle_options(role(), client_options() | daemon_options()) ->
-                        private_options() | error().
-handle_options(Role, PropList0) ->
-    handle_options(Role,
-                   PropList0,
-                   #{socket_options => [],
-                     internal_options => #{},
-                     key_cb_options => []}).
+-spec handle_options(role(), client_options()|daemon_options()) -> private_options() | error() .
 
-handle_options(Role, OptsList0, Opts0) when is_map(Opts0), is_list(OptsList0) ->
-    OptsList1 =
-        proplists:unfold(
-            lists:foldr(fun (T, Acc) when tuple_size(T) =/= 2 ->
-                                [{special_trpt_args, T} | Acc];
-                            (X, Acc) ->
-                                [X | Acc]
+handle_options(Role, PropList0) ->
+    handle_options(Role, PropList0, #{socket_options   => [],
+                                      internal_options => #{},
+                                      key_cb_options   => []
+                                     }).
+
+handle_options(Role, OptsList0, Opts0) when is_map(Opts0),
+                         is_list(OptsList0) ->
+    OptsList1 = proplists:unfold(
+                  lists:foldr(fun(T,Acc) when tuple_size(T) =/= 2 -> [{special_trpt_args,T} | Acc];
+                                 (X,Acc) -> [X|Acc]
                               end,
                               [], OptsList0)),
     try
@@ -220,14 +216,15 @@ handle_options(Role, OptsList0, Opts0) when is_map(Opts0), is_list(OptsList0) ->
                               %% Use the default value
                               {M#{K => Vd}, PL}
                       end
-                      end,
                  %%          ;
                  %% (_,_,Acc) ->
                  %%      Acc
+              end,
               {Opts0#{key_cb_options => maps:get(key_cb_options,Opts0)},
-                       [{K, V}
-                        || {K, V} <- OptsList1,
-                           not maps:is_key(K, Opts0)]}, % Keep socket opts
+               [{K,V} || {K,V} <- OptsList1,
+                         not maps:is_key(K,Opts0) % Keep socket opts
+               ]
+              },
               OptionDefinitions),
 
 
@@ -324,10 +321,9 @@ save({Key,Value}, Defs, OptMap) when is_map(OptMap) ->
         false ->
             error({eoptions, {Key,Value}, "Bad value"});
         forbidden ->
-            error({eoptions,
-                   {Key, Value},
-                   io_lib:format("The option '~s' is used internally. The user is not allowed "
-                                 "to specify this option.",
+            error({eoptions, {Key,Value}, 
+                   io_lib:format("The option '~s' is used internally. The "
+                                 "user is not allowed to specify this option.",
                                  [Key])})
     catch
         %% An unknown Key (= not in the definition map) is
@@ -410,19 +406,20 @@ default(server) ->
         #{
       subsystems =>
           #{default => [ssh_sftpd:subsystem_spec([])],
-                             chk =>
-                                 fun(L) ->
-                                    is_list(L)
-                                    andalso lists:all(fun (SubSystem = {Name, {CB, Args}}) ->
-                                                              check_string(Name)
-                                                              andalso is_atom(CB)
-                                                              andalso is_list(Args)
-                                                              andalso check_subsystem(SubSystem);
-                                                          (_) -> false
+            chk => fun(L) ->
+                           is_list(L) andalso
+                               lists:all(fun(SubSystem = {Name,{CB,Args}}) ->
+                                                 check_string(Name) andalso
+                                                     is_atom(CB) andalso
+                                                     is_list(Args) andalso
+                                                     check_subsystem(SubSystem);
+                                            (_) ->
+                                                 false
+                                         end, L)
                    end,
-                                                      L)
-                                 end,
-                             class => user_option},
+            class => user_option
+           },
+
       shell =>
           #{default => ?DEFAULT_SHELL,
             chk => fun({M,F,A}) -> is_atom(M) andalso is_atom(F) andalso is_list(A);
@@ -516,20 +513,17 @@ default(server) ->
       no_auth_needed =>
           #{default => false,
             chk => fun(V) -> erlang:is_boolean(V) end,
-                             class => user_option},
-                       %% FIDO/U2F counter monotonicity callback; invoked after
-                       %% SK signature verification and UP enforcement succeed.
-                       %% fun(CounterInfo) -> ok | {error,_}.
-                       %% See ssh.hrl for the sk_fido_counter_info() type.
-                       sk_fido_counter_fun =>
-                           #{default => undefined,
-                             chk =>
-                                 fun (undefined) ->
-                                         true;
-                                     (F) ->
-                                         check_function1(F)
-                                 end,
-                             class => user_option},
+            class => user_option
+           },
+
+      sk_fido_counter_fun =>
+          #{default => undefined,
+            chk => fun(undefined) -> true;
+                      (F) -> check_function1(F)
+                   end,
+            class => user_option
+           },
+
       pk_check_user =>
           #{default => false,
             chk => fun(V) -> erlang:is_boolean(V) end,
@@ -1146,15 +1140,12 @@ check_silently_accept_hosts({false,S}) when is_atom(S) -> valid_hash(S);
 check_silently_accept_hosts({S,F}) when is_function(F,2) -> valid_hash(S);
 check_silently_accept_hosts(_) -> false.
 
-valid_hash(S) ->
-    valid_hash(S, proplists:get_value(hashs, crypto:supports())).
 
-valid_hash(S, Ss) when is_atom(S) ->
-    lists:member(S, ?SHAs) andalso lists:member(S, Ss);
-valid_hash(L, Ss) when is_list(L) ->
-    lists:all(fun(S) -> valid_hash(S, Ss) end, L);
-valid_hash(X, _) ->
-    error_in_check(X, "Expect atom or list in fingerprint spec").
+valid_hash(S) -> valid_hash(S, proplists:get_value(hashs,crypto:supports())).
+
+valid_hash(S, Ss) when is_atom(S) -> lists:member(S, ?SHAs) andalso lists:member(S, Ss);
+valid_hash(L, Ss) when is_list(L) -> lists:all(fun(S) -> valid_hash(S,Ss) end, L);
+valid_hash(X,  _) -> error_in_check(X, "Expect atom or list in fingerprint spec").
 
 %%%----------------------------------------------------------------
 initial_default_algorithms(DefList, ModList) ->
@@ -1166,8 +1157,8 @@ check_modify_algorithms(M) when is_list(M) ->
     [error_in_check(Op_KVs, "Bad modify_algorithms")
      || Op_KVs <- M,
         not is_tuple(Op_KVs)
-        orelse tuple_size(Op_KVs) =/= 2
-        orelse not lists:member(element(1, Op_KVs), [append, prepend, rm])],
+            orelse (tuple_size(Op_KVs) =/= 2)
+            orelse (not lists:member(element(1,Op_KVs), [append,prepend,rm]))],
     {true, [{Op,normalize_mod_algs(KVs,false)} || {Op,KVs} <- M]};
 check_modify_algorithms(_) ->
     error_in_check(modify_algorithms, "Bad option value. List expected.").
@@ -1276,7 +1267,9 @@ check_preferred_algorithms(_) ->
 
 check_input_ok(Algs) ->
     [error_in_check(KVs, "Bad preferred_algorithms")
-     || KVs <- Algs, not is_tuple(KVs) orelse tuple_size(KVs) =/= 2].
+     || KVs <- Algs,
+        not is_tuple(KVs)
+            orelse (tuple_size(KVs) =/= 2)].
 
 %%%----------------------------------------------------------------
 final_preferred_algorithms(Options0) ->
@@ -1307,14 +1300,12 @@ eval_op({Op,AlgKVs}, PrefAlgs) ->
 
 eval_op(Op, [{C,L1}|T1], [{C,L2}|T2], Acc) -> 
     eval_op(Op, T1, T2, [{C,eval_op(Op,L1,L2,[])} | Acc]);
-eval_op(_, [], [], Acc) ->
-    lists:reverse(Acc);
-eval_op(rm, Opt, Pref, []) when is_list(Opt), is_list(Pref) ->
-    Pref -- Opt;
-eval_op(append, Opt, Pref, []) when is_list(Opt), is_list(Pref) ->
-    (Pref -- Opt) ++ Opt;
-eval_op(prepend, Opt, Pref, []) when is_list(Opt), is_list(Pref) ->
-    Opt ++ Pref -- Opt.
+
+eval_op(_,        [],   [], Acc) -> lists:reverse(Acc);
+eval_op(rm,      Opt, Pref,  []) when is_list(Opt), is_list(Pref) -> Pref -- Opt;
+eval_op(append,  Opt, Pref,  []) when is_list(Opt), is_list(Pref) -> (Pref--Opt) ++ Opt;
+eval_op(prepend, Opt, Pref,  []) when is_list(Opt), is_list(Pref) -> Opt ++ (Pref--Opt).
+
 
 rm_non_supported(UnsupIsErrorFlg, KVs) ->
     [{K,rmns(K,Vs, UnsupIsErrorFlg)} || {K,Vs} <- KVs].

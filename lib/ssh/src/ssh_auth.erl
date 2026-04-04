@@ -23,8 +23,7 @@
 %%
 
 -module(ssh_auth).
-
--moduledoc(false).
+-moduledoc false.
 
 -include_lib("public_key/include/public_key.hrl").
 
@@ -255,10 +254,12 @@ handle_userauth_request(#ssh_msg_userauth_request{user = User,
 handle_userauth_request(#ssh_msg_userauth_request{user = User,
 						  service = "ssh-connection",
 						  method = "password",
-                                                  data = <<?TRUE, _/binary>>},
+						  data = <<?TRUE,
+							   _/binary
 							   %% ?UINT32(Sz1), OldBinPwd:Sz1/binary,
 							   %% ?UINT32(Sz2), NewBinPwd:Sz2/binary
-                        _,
+							 >>
+						 }, _, 
 			#ssh{userauth_supported_methods = Methods} = Ssh) ->
     %% Password change without us having sent SSH_MSG_USERAUTH_PASSWD_CHANGEREQ (because we never do)
     %% RFC 4252 says:
@@ -335,9 +336,10 @@ handle_userauth_request(#ssh_msg_userauth_request{user = User,
                              userauth_supported_methods = Methods} = Ssh0) ->
     
     {UserOk,Ssh} = check_user(User, Ssh0),
-    case (PreVerifyUser == User orelse PreVerifyUser == undefined)
-         andalso UserOk
-         andalso verify_sig(SessionId, User, "ssh-connection", BAlg, KeyBlob, SigWLen, Ssh)
+    case
+        ((PreVerifyUser == User) orelse (PreVerifyUser == undefined)) andalso
+        UserOk andalso
+        verify_sig(SessionId, User, "ssh-connection", BAlg, KeyBlob, SigWLen, Ssh)
     of
 	true ->
 	    {authorized, User, 
@@ -448,8 +450,9 @@ handle_userauth_info_response(#ssh_msg_userauth_info_response{num_responses = 1,
 				   user = User,
 				   userauth_supported_methods = Methods} = Ssh) ->
     SendOneEmpty =
-        ?GET_OPT(tstflg, Opts) == one_empty
-        orelse proplists:get_value(one_empty, ?GET_OPT(tstflg, Opts), false),
+	(?GET_OPT(tstflg,Opts) == one_empty)
+	orelse 
+	proplists:get_value(one_empty, ?GET_OPT(tstflg,Opts), false),
 
     case check_password(User, Password, Ssh) of
 	{true,Ssh1} when SendOneEmpty==true ->
@@ -563,7 +566,6 @@ pre_verify_sig(User, KeyBlob,  #ssh{opts=Opts}) ->
 	    false
     end.
 
-%% FIDO/U2F security key signature verification.
 %%
 %% SK signature wire format (OpenSSH PROTOCOL.u2f §"signatures"):
 %%   string   algorithm-name
@@ -719,14 +721,11 @@ build_sig_data(SessionId, User, Service, KeyBlob, Alg) ->
 	   ?binary(KeyBlob)],
     list_to_binary(Sig).
 
-%% SK algorithms: key type == signature algorithm (identity mapping),
-%% handled by the catch-all clause below.
-key_alg('rsa-sha2-256') ->
-    'ssh-rsa';
-key_alg('rsa-sha2-512') ->
-    'ssh-rsa';
-key_alg(Alg) ->
-    Alg.
+
+
+key_alg('rsa-sha2-256') -> 'ssh-rsa';
+key_alg('rsa-sha2-512') -> 'ssh-rsa';
+key_alg(Alg) -> Alg.
 
 %%%================================================================
 %%%
@@ -928,16 +927,24 @@ ssh_dbg_format(authentication,  {call, {?MODULE,userauth_request_msg,
     {["AUTH client: Server supports\n",
       io_lib:format("user = ~p~nmethods = ~p", [User,Methods])],
      Stack};
-ssh_dbg_format(authentication, {call, {?MODULE, userauth_request_msg, [_Ssh]}}, Stack) ->
-    {skip, Stack};
-ssh_dbg_format(authentication,
-               {return_from, {?MODULE, userauth_request_msg, 1}, {send_disconnect, _Code, _Ssh}},
+
+ssh_dbg_format(authentication,  {call, {?MODULE,userauth_request_msg,[_Ssh]}},
                Stack) ->
     {skip,Stack};
-ssh_dbg_format(authentication,
-               {return_from, {?MODULE, userauth_request_msg, 1}, {Method, {_Msg, _Ssh}}},
+
+ssh_dbg_format(authentication, {return_from, {?MODULE,userauth_request_msg,1},
+                                {send_disconnect, _Code, _Ssh}},
                Stack) ->
-    {["AUTH client: Try auth with\n", io_lib:format("method = ~p", [Method])], Stack};
+    {skip,Stack};
+ssh_dbg_format(authentication, {return_from, {?MODULE,userauth_request_msg,1},
+                                {Method,{_Msg,_Ssh}}},
+               Stack) ->
+    {["AUTH client: Try auth with\n",
+      io_lib:format("method = ~p", [Method])],
+     Stack};
+
+               
+
 ssh_dbg_format(authentication, Unhandled, Stack) ->
     case Unhandled of
         {call, {?MODULE,_F,_Args}} -> ok;
@@ -955,8 +962,11 @@ fmt_req(#ssh_msg_userauth_request{user = User,
                                   service = "ssh-connection",
                                   method = Method,
                                   data = Data}, 
-        #ssh{kb_tries_left = KbTriesLeft, userauth_supported_methods = Methods}) ->
-    [io_lib:format("req user = ~p~nreq method = ~p~nsupported methods = ~p",
+        #ssh{kb_tries_left = KbTriesLeft,
+             userauth_supported_methods = Methods}) ->
+    [io_lib:format("req user = ~p~n"
+                   "req method = ~p~n"
+                   "supported methods = ~p",
                    [User,Method,Methods]),
      case Method of
          "none" -> "";

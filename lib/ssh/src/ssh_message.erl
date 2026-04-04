@@ -24,8 +24,7 @@
 
 %%------------------------------------------------------------------
 -module(ssh_message).
-
--moduledoc(false).
+-moduledoc false.
 
 -include_lib("public_key/include/public_key.hrl").
 -include_lib("kernel/include/logger.hrl").
@@ -36,8 +35,14 @@
 -include("ssh_transport.hrl").
 
 -export([encode/1, decode/1, decode_keyboard_interactive_prompts/2]).
--export([ssh2_pubkey_decode/1, ssh2_pubkey_encode/1, ssh2_privkey_decode2/1,
-         oid2ssh_curvename/1, ssh_curvename2oid/1, ssh2_privkey_encode/1]).
+-export([ssh2_pubkey_decode/1,
+         ssh2_pubkey_encode/1,
+         ssh2_privkey_decode2/1,
+         oid2ssh_curvename/1,
+         ssh_curvename2oid/1,
+         %% experimental:
+         ssh2_privkey_encode/1
+        ]).
 
 -behaviour(ssh_dbg).
 -export([ssh_dbg_trace_points/0, ssh_dbg_flags/1, ssh_dbg_on/1, ssh_dbg_off/1, ssh_dbg_format/2]).
@@ -697,8 +702,9 @@ ssh2_pubkey_decode2(<<?UINT32(7), "ssh-dss",
                       Rest/binary>>) ->
     {{Y, #'Dss-Parms'{p = P,
                       q = Q,
-                   g = G}},
-     Rest};
+                      g = G}
+     }, Rest};
+
 %% FIDO/U2F security key public key decoding (OpenSSH PROTOCOL.u2f).
 %% String length 34 = byte_size("sk-ecdsa-sha2-nistp256@openssh.com")
 %% String length 26 = byte_size("sk-ssh-ed25519@openssh.com")
@@ -770,8 +776,11 @@ ssh2_privkey_encode(#'DSAPrivateKey'
       ?Empint(Q),
       ?Empint(G),
       ?Empint(Y), % Publ key
-      ?Empint(X)>>;  % Priv key
-ssh2_privkey_encode(#'ECPrivateKey'{version = Version,
+      ?Empint(X)  % Priv key
+    >>;
+
+ssh2_privkey_encode(#'ECPrivateKey'
+                    {version = Version,
                      parameters = {namedCurve,OID},
                      privateKey = Priv,
                      publicKey = Pub})
@@ -857,29 +866,19 @@ ssh2_privkey_decode2(<<?DEC_BIN(SshCurveName,SCNL), Rest0/binary>>) ->
 %% Description: Converts from the ssh name of elliptic curves to
 %% the OIDs.
 %%--------------------------------------------------------------------
-ssh_curvename2oid(<<"ssh-ed25519">>) ->
-    ?'id-Ed25519';
-ssh_curvename2oid(<<"ssh-ed448">>) ->
-    ?'id-Ed448';
-ssh_curvename2oid(<<"ecdsa-sha2-nistp256">>) ->
-    ?secp256r1;
-ssh_curvename2oid(<<"ecdsa-sha2-nistp384">>) ->
-    ?secp384r1;
-ssh_curvename2oid(<<"ecdsa-sha2-nistp521">>) ->
-    ?secp521r1.
+ssh_curvename2oid(<<"ssh-ed25519">>) -> ?'id-Ed25519';
+ssh_curvename2oid(<<"ssh-ed448">>  ) -> ?'id-Ed448';
+ssh_curvename2oid(<<"ecdsa-sha2-nistp256">>) -> ?'secp256r1';
+ssh_curvename2oid(<<"ecdsa-sha2-nistp384">>) -> ?'secp384r1';
+ssh_curvename2oid(<<"ecdsa-sha2-nistp521">>) -> ?'secp521r1'.
 
 %% Description: Converts from elliptic curve OIDs to the ssh name.
 %%--------------------------------------------------------------------
-oid2ssh_curvename(?'id-Ed25519') ->
-    {<<"ssh-ed25519">>, 'n/a'};
-oid2ssh_curvename(?'id-Ed448') ->
-    {<<"ssh-ed448">>, 'n/a'};
-oid2ssh_curvename(?secp256r1) ->
-    {<<"ecdsa-sha2-nistp256">>, <<"nistp256">>};
-oid2ssh_curvename(?secp384r1) ->
-    {<<"ecdsa-sha2-nistp384">>, <<"nistp384">>};
-oid2ssh_curvename(?secp521r1) ->
-    {<<"ecdsa-sha2-nistp521">>, <<"nistp521">>}.
+oid2ssh_curvename(?'id-Ed25519')-> {<<"ssh-ed25519">>, 'n/a'};
+oid2ssh_curvename(?'id-Ed448')  -> {<<"ssh-ed448">>,   'n/a'};
+oid2ssh_curvename(?'secp256r1') -> {<<"ecdsa-sha2-nistp256">>, <<"nistp256">>};
+oid2ssh_curvename(?'secp384r1') -> {<<"ecdsa-sha2-nistp384">>, <<"nistp384">>};
+oid2ssh_curvename(?'secp521r1') -> {<<"ecdsa-sha2-nistp521">>, <<"nistp521">>}.
 
 %%%================================================================
 %%%
@@ -1026,8 +1025,9 @@ ssh_dbg_format(ssh_messages, {return_from,{?MODULE,decode,1},Msg}) ->
                                            ?UINT32(Width),?UINT32(Height),
                                            ?UINT32(PixWidth), ?UINT32(PixHeight),
                                            Modes/binary>>} ->
-             io_lib:format("  data decoded: terminal = ~s~n                width x height "
-                           "= ~p x ~p~n                pix-width x pix-height = ~p x ~p~n "
+             io_lib:format("  data decoded: terminal = ~s~n"
+                           "                width x height = ~p x ~p~n"
+                           "                pix-width x pix-height = ~p x ~p~n"
                            "                pty-opts = ~p~n",
                            [BTermName, Width,Height, PixWidth, PixHeight,
                             ssh_connection:decode_pty_opts(Modes)]);
