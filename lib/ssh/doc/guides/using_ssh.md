@@ -430,6 +430,66 @@ and `ClientAddress`). See the
 > It still works, but lacks for example I/O possibility. It is because of that
 > compatibility we need the `{direct,...}` construction.
 
+## FIDO Security Key Authentication
+
+The Erlang SSH daemon can authenticate clients that use FIDO/U2F security keys
+(also known as `-sk` keys in OpenSSH). This works with both `ecdsa-sk` and
+`ed25519-sk` key types.
+
+No special daemon configuration is required — FIDO key types are included in
+the default algorithm set. The daemon verifies the FIDO signature
+automatically as part of standard public key authentication.
+
+_Step 1._ On the client machine, generate a FIDO key (requires a hardware
+security key or `sk-dummy.so` for testing):
+
+```text
+$bash> ssh-keygen -t ecdsa-sk
+```
+
+_Step 2._ Add the public key to the daemon's `authorized_keys` file, as you
+would with any other key type.
+
+_Step 3._ Start the Erlang daemon normally:
+
+```erlang
+1> ssh:start().
+ok
+2> {ok, Sshd} = ssh:daemon(8989, [{system_dir, "/tmp/ssh_daemon"},
+                                  {user_dir, "/tmp/otptest_user/.ssh"}]).
+{ok,<0.54.0>}
+```
+
+_Step 4._ Connect from an OpenSSH client. The security key will blink,
+requesting a touch:
+
+```text
+$bash> ssh -p 8989 -i ~/.ssh/id_ecdsa_sk localhost
+Confirm user presence for key ECDSA-SK ...
+[touch the security key]
+Eshell V15.0  (abort with ^G)
+1>
+```
+
+### Custom FIDO Verification
+
+To enforce additional policy (for example, requiring user presence), use the
+`sk_fido_verify_fun` daemon option:
+
+```erlang
+{ok, Sshd} = ssh:daemon(8989,
+                         [{system_dir, "/tmp/ssh_daemon"},
+                          {user_dir, "/tmp/otptest_user/.ssh"},
+                          {sk_fido_verify_fun,
+                           fun(#{user_presence := true}) -> ok;
+                              (_) -> {error, no_user_presence}
+                           end}]).
+```
+
+The callback receives a map with keys `flags`, `counter`, `user_presence`,
+`user_verification`, `user`, and `algorithm`. See the
+[SSH Application](ssh_app.md) reference for details.
+
 ## SFTP Server
 
 Start the Erlang `ssh` daemon with the SFTP subsystem:

@@ -56,12 +56,16 @@ Some special configuration files from OpenSSH are also used:
 - `id_ecdsa`
 - `id_ed25519`
 - `id_ed448`
+- `id_ecdsa_sk`
+- `id_ed25519_sk`
 - `ssh_host_dsa_key` _(supported but disabled by default)_
 - `ssh_host_rsa_key` _(SHA1 sign/verify are supported but disabled by default
   from OTP-24)_
 - `ssh_host_ecdsa_key`
 - `ssh_host_ed25519_key`
 - `ssh_host_ed448_key`
+- `ssh_host_ecdsa_sk_key`
+- `ssh_host_ed25519_sk_key`
 
 By default, `ssh` looks for `id_*`, `known_hosts`, and `authorized_keys` in
 `~/.ssh`, and for the ssh\_host\_\*\_key files in `/etc/ssh`. These locations can
@@ -106,9 +110,10 @@ See [ssh_file](`m:ssh_file#FILE-authorized_keys`) for details.
 
 ## Host Keys
 
-RSA, DSA (if enabled), ECDSA, ED25519 and ED448 host keys are supported and are
-expected to be found in files named `ssh_host_rsa_key`, `ssh_host_dsa_key`,
-`ssh_host_ecdsa_key`, `ssh_host_ed25519_key` and `ssh_host_ed448_key`.
+RSA, DSA (if enabled), ECDSA, ED25519, ED448, ECDSA-SK and ED25519-SK host keys
+are supported and are expected to be found in files named `ssh_host_rsa_key`,
+`ssh_host_dsa_key`, `ssh_host_ecdsa_key`, `ssh_host_ed25519_key`,
+`ssh_host_ed448_key`, `ssh_host_ecdsa_sk_key` and `ssh_host_ed25519_sk_key`.
 
 See [ssh_file](`m:ssh_file#FILE-ssh_host_STAR_key`) for details.
 
@@ -172,6 +177,8 @@ for example the Option value
 - ecdsa-sha2-nistp256
 - rsa-sha2-512
 - rsa-sha2-256
+- sk-ecdsa-sha2-nistp256@openssh.com
+- sk-ssh-ed25519@openssh.com
 
 The following unsecure `SHA1` algorithms are supported but disabled by
 default:
@@ -393,6 +400,70 @@ The following RFCs are supported:
 - [Secure Shell (SSH) Key Exchange Method Using Curve25519 and Curve448](https://tools.ietf.org/html/rfc8731)
 - [RFC 8709](https://tools.ietf.org/html/rfc8709) Ed25519 and Ed448 public key
   algorithms for the Secure Shell (SSH) protocol
+
+## FIDO/U2F Security Key Support
+
+The SSH application supports server-side verification of FIDO/U2F security key
+authentication.  When an OpenSSH client authenticates using an `ecdsa-sk` or
+`ed25519-sk` key, the Erlang SSH daemon verifies the FIDO signature
+(including the authenticator data: application hash, flags, and counter)
+as part of public key authentication.
+
+The following algorithm names are registered:
+
+- `sk-ecdsa-sha2-nistp256@openssh.com` — ECDSA over NIST P-256 with FIDO
+- `sk-ssh-ed25519@openssh.com` — Ed25519 with FIDO
+
+These algorithms follow the format defined in the
+[OpenSSH PROTOCOL.u2f](https://github.com/openssh/openssh-portable/blob/master/PROTOCOL.u2f)
+specification.
+
+### Daemon option: sk_fido_verify_fun
+
+An optional callback can be set on the daemon to apply custom policy after
+cryptographic verification succeeds.  The callback receives a map with the
+following keys:
+
+- `flags` — the raw flags byte from the FIDO authenticator data
+- `counter` — the 32-bit signature counter
+- `user_presence` — `true` if the User Presence (UP) flag is set
+- `user_verification` — `true` if the User Verified (UV) flag is set
+- `user` — the username being authenticated (string)
+- `algorithm` — the negotiated algorithm atom
+
+The callback must return `ok` to allow authentication, or `{error, Reason}` to
+reject it.  If `sk_fido_verify_fun` is not set (the default), authentication
+succeeds whenever the cryptographic signature is valid.
+
+Example — require user presence (touch):
+
+```erlang
+ssh:daemon(2222,
+           [{system_dir, "/etc/ssh"},
+            {sk_fido_verify_fun,
+             fun(#{user_presence := true}) -> ok;
+                (_) -> {error, no_user_presence}
+             end}]).
+```
+
+### Known Limitations
+
+- **Server-side only** — the Erlang SSH application can *verify* FIDO
+  signatures from OpenSSH clients, but cannot *generate* them.  Client-side
+  FIDO signing would require hardware middleware (e.g., `libfido2`) and is out
+  of scope.
+
+- **No signature counter enforcement** — the FIDO signature counter is
+  included in cryptographic verification (tampering causes verification
+  failure), but the server does not track `last_seen_counter` per key or
+  reject signatures where `counter <= last_seen_counter`.  This means cloned
+  tokens cannot be detected via counter regression.  OpenSSH's own `sshd` also
+  does not enforce this by default.  Counter values are exposed via the
+  `sk_fido_verify_fun` callback, so applications can implement their own
+  tracking if needed.
+
+- **No attestation verification** — FIDO attestation certificates are not
+  checked.  This is consistent with OpenSSH's behaviour.
 
 ## See Also
 
