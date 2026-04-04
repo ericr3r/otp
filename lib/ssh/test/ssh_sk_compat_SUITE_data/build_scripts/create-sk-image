@@ -1,0 +1,226 @@
+#!/bin/sh
+# %CopyrightBegin%
+#
+# SPDX-License-Identifier: Apache-2.0
+#
+# Copyright Ericsson AB 2025. All Rights Reserved.
+#
+# Licensed under the Apache License, Version 2.0 (the "License");
+# you may not use this file except in compliance with the License.
+# You may obtain a copy of the License at
+#
+#     http://www.apache.org/licenses/LICENSE-2.0
+#
+# Unless required by applicable law or agreed to in writing, software
+# distributed under the License is distributed on an "AS IS" BASIS,
+# WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+# See the License for the specific language governing permissions and
+# limitations under the License.
+#
+# %CopyrightEnd%
+
+# Build a Docker image containing OpenSSH >= 9.2p1 compiled with sk-dummy.so
+# for FIDO/U2F integration testing against the Erlang OTP SSH application.
+#
+# Usage:
+#   ./create-sk-image [openssh-version]
+#
+# Example:
+#   ./create-sk-image 9.9p1
+#   ./create-sk-image           # defaults to 9.9p1
+#
+# The resulting Docker image is tagged:
+#   ssh_sk_compat_suite-sk:openssh<VER>
+#
+# The image runs sshd in foreground on port 1234, with:
+#   - sk-dummy.so built and installed at /buildroot/ssh/lib/sk-dummy.so
+#   - A test user "sshtester" with password "foobar"
+#   - PubkeyAcceptedAlgorithms includes sk-ecdsa-sha2-nistp256@openssh.com
+#     and sk-ssh-ed25519@openssh.com
+#   - Pre-generated FIDO test keys (via sk-dummy.so) in ~sshtester/.ssh/
+
+set -e
+
+OPENSSH_VER="${1:-9.9p1}"
+IMAGE_TAG="ssh_sk_compat_suite-sk:openssh${OPENSSH_VER}"
+DOCKER_PFX="ssh_sk_compat_suite-sk"
+
+OPENSSH_URL="https://ftp.eu.openbsd.org/pub/OpenBSD/OpenSSH/portable/openssh-${OPENSSH_VER}.tar.gz"
+TMP_TAR="openssh-${OPENSSH_VER}.tar.gz"
+
+SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"
+
+echo "=== Building SK-dummy Docker image ==="
+echo "  OpenSSH version: ${OPENSSH_VER}"
+echo "  Image tag:       ${IMAGE_TAG}"
+echo ""
+
+# Download the OpenSSH tarball outside Docker to handle proxy settings
+if [ ! -f "${SCRIPT_DIR}/${TMP_TAR}" ]; then
+    echo "Downloading OpenSSH ${OPENSSH_VER}..."
+    wget -O "${SCRIPT_DIR}/${TMP_TAR}" "${OPENSSH_URL}"
+else
+    echo "Using cached ${TMP_TAR}"
+fi
+
+# Generate Dockerfile
+cat > "${SCRIPT_DIR}/Dockerfile.sk" <<'DOCKERFILE_EOF'
+ARG UBUNTU_VERSION=22.04
+FROM ubuntu:${UBUNTU_VERSION}
+
+ARG OPENSSH_VER
+ARG DEBIAN_FRONTEND=noninteractive
+
+LABEL description="OpenSSH with sk-dummy.so for FIDO/U2F integration testing"
+LABEL openssh-version=${OPENSSH_VER}
+
+# Install build dependencies
+RUN apt-get update && apt-get install -y --no-install-recommends \
+        build-essential \
+        zlib1g-dev \
+        libssl-dev \
+        libpam0g-dev \
+        libfido2-dev \
+        sshpass \
+        sudo \
+        iputils-ping \
+        net-tools \
+    && rm -rf /var/lib/apt/lists/*
+
+# Create test user
+RUN groupadd -r sshtester || true \
+    && useradd -m -s /bin/bash -G sudo sshtester \
+    && echo 'sshtester:foobar' | chpasswd \
+    && echo 'sshtester ALL=(ALL) NOPASSWD:ALL' >> /etc/sudoers
+
+# Prepare sshd privilege separation
+RUN mkdir -p /var/empty \
+    && chmod 755 /var/empty \
+    && (getent group sshd > /dev/null || groupadd -r sshd) \
+    && (getent passwd sshd > /dev/null || useradd -r -g sshd -d /var/empty -s /bin/false sshd)
+
+WORKDIR /buildroot
+
+# Copy and extract OpenSSH source
+COPY openssh-${OPENSSH_VER}.tar.gz .
+RUN tar xf openssh-${OPENSSH_VER}.tar.gz
+
+# Build OpenSSH with security key support
+WORKDIR /buildroot/openssh-${OPENSSH_VER}
+
+RUN ./configure \
+        --prefix=/buildroot/ssh \
+        --with-pam \
+        --with-security-key-builtin \
+    && make -j"$(nproc)" \
+    && make install
+
+# Build sk-dummy.so from the regress test directory
+# sk-dummy.so is the software FIDO authenticator used for testing
+RUN cd regress/misc/sk-dummy \
+    && if [ -f Makefile ]; then \
+           make; \
+       else \
+           cc -shared -fPIC \
+              -I../../.. \
+              -I/buildroot/openssh-${OPENSSH_VER} \
+              -o sk-dummy.so sk-dummy.c \
+              -lcrypto; \
+       fi \
+    && mkdir -p /buildroot/ssh/lib \
+    && cp sk-dummy.so /buildroot/ssh/lib/sk-dummy.so
+
+# Verify sk-dummy.so was built
+RUN ls -la /buildroot/ssh/lib/sk-dummy.so \
+    && echo "sk-dummy.so built successfully"
+
+# Generate host keys
+RUN /buildroot/ssh/bin/ssh-keygen -A -f /buildroot
+
+# Configure sshd for FIDO testing
+RUN cat >> /buildroot/ssh/etc/sshd_config <<'SSHD_EOF'
+# Enable password and publickey authentication
+PasswordAuthentication yes
+PubkeyAuthentication yes
+UsePAM yes
+
+# Explicitly allow SK key types
+PubkeyAcceptedAlgorithms +sk-ecdsa-sha2-nistp256@openssh.com,sk-ssh-ed25519@openssh.com
+
+# Allow the test user
+AllowUsers sshtester
+
+# Logging for debugging
+LogLevel DEBUG
+
+# No DNS lookups
+UseDNS no
+SSHD_EOF
+
+# Generate FIDO test keys for the test user using sk-dummy.so
+# These keys will be used by the Erlang OTP SSH daemon to verify
+# FIDO authentication from the Docker OpenSSH client.
+RUN mkdir -p /home/sshtester/.ssh \
+    && chmod 700 /home/sshtester/.ssh \
+    && SSH_SK_PROVIDER=/buildroot/ssh/lib/sk-dummy.so \
+       /buildroot/ssh/bin/ssh-keygen -t ecdsa-sk -f /home/sshtester/.ssh/id_ecdsa_sk \
+           -N "" -C "ECDSA-SK test key (sk-dummy)" \
+    && SSH_SK_PROVIDER=/buildroot/ssh/lib/sk-dummy.so \
+       /buildroot/ssh/bin/ssh-keygen -t ed25519-sk -f /home/sshtester/.ssh/id_ed25519_sk \
+           -N "" -C "Ed25519-SK test key (sk-dummy)" \
+    && touch /home/sshtester/.ssh/authorized_keys \
+    && chmod 600 /home/sshtester/.ssh/authorized_keys \
+    && chown -R sshtester:sshtester /home/sshtester/.ssh
+
+# Also export the public keys to a well-known location for the test harness
+RUN mkdir -p /buildroot/test_keys \
+    && cp /home/sshtester/.ssh/id_ecdsa_sk.pub /buildroot/test_keys/ \
+    && cp /home/sshtester/.ssh/id_ed25519_sk.pub /buildroot/test_keys/ \
+    && cp /home/sshtester/.ssh/id_ecdsa_sk /buildroot/test_keys/ \
+    && cp /home/sshtester/.ssh/id_ed25519_sk /buildroot/test_keys/
+
+# Create a helper script that the test harness can call to sign with sk-dummy
+# Usage: /buildroot/sk-sign.sh <key_type> <data_file> <output_file>
+RUN cat > /buildroot/sk-ssh.sh <<'HELPER_EOF'
+#!/bin/bash
+# Helper script for FIDO SK operations within the Docker container.
+# The SSH_SK_PROVIDER is set so all ssh/ssh-keygen commands use sk-dummy.so.
+export SSH_SK_PROVIDER=/buildroot/ssh/lib/sk-dummy.so
+export PATH=/buildroot/ssh/bin:$PATH
+exec "$@"
+HELPER_EOF
+    && chmod +x /buildroot/sk-ssh.sh
+
+EXPOSE 1234
+
+# Start sshd in foreground
+CMD ["/buildroot/ssh/sbin/sshd", "-D", "-p", "1234", "-e"]
+DOCKERFILE_EOF
+
+# Build the Docker image
+echo "Building Docker image ${IMAGE_TAG}..."
+cd "${SCRIPT_DIR}"
+docker build \
+    --build-arg OPENSSH_VER="${OPENSSH_VER}" \
+    -t "${IMAGE_TAG}" \
+    -f Dockerfile.sk \
+    .
+
+# Tag with the standard prefix for discovery by the test suite
+docker tag "${IMAGE_TAG}" "${DOCKER_PFX}:${OPENSSH_VER}"
+
+echo ""
+echo "=== Build complete ==="
+echo "Image: ${IMAGE_TAG}"
+echo ""
+echo "To run:"
+echo "  docker run -itd --rm -p 1234 ${IMAGE_TAG}"
+echo ""
+echo "To test FIDO key generation inside the container:"
+echo "  docker exec <container_id> /buildroot/sk-ssh.sh ssh-keygen -t ecdsa-sk -f /tmp/test_key -N ''"
+echo ""
+echo "To extract pre-generated test public keys:"
+echo "  docker cp <container_id>:/buildroot/test_keys/ ./sk_test_keys/"
+
+# Clean up generated Dockerfile (keep tarball for caching)
+rm -f "${SCRIPT_DIR}/Dockerfile.sk"
