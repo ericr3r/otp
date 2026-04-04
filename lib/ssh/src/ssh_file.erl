@@ -85,6 +85,10 @@ Clients uses all files stored in the [USERDIR](`m:ssh_file#USERDIR`) directory.
     key for curve 25519 (optional)
   - `ssh_host_ed448_key`{: #FILE-ssh_host_ed448_key } \- private eddsa host key
     for curve 448 (optional)
+  - `ssh_host_ecdsa_sk_key`{: #FILE-ssh_host_ecdsa_sk_key } \- private ecdsa-sk
+    host key for FIDO/U2F security keys (optional)
+  - `ssh_host_ed25519_sk_key`{: #FILE-ssh_host_ed25519_sk_key } \- private
+    ed25519-sk host key for FIDO/U2F security keys (optional)
 
   The key files could be generated with OpenSSH's ssh-keygen command.
 
@@ -123,6 +127,8 @@ Clients uses all files stored in the [USERDIR](`m:ssh_file#USERDIR`) directory.
              | 'ssh-ecdsa-nistp521'
              | 'ssh-ed25519'
     	 | 'ssh-ed448'
+             | 'sk-ecdsa-sha2-nistp256@openssh.com'
+    	 | 'sk-ssh-ed25519@openssh.com'
     base64-encoded-key :: % The user's public key
     comment :: % Comments are skipped
     ```
@@ -151,6 +157,8 @@ Clients uses all files stored in the [USERDIR](`m:ssh_file#USERDIR`) directory.
              | 'ssh-ecdsa-nistp521'
              | 'ssh-ed25519'
     	 | 'ssh-ed448'
+             | 'sk-ecdsa-sha2-nistp256@openssh.com'
+    	 | 'sk-ssh-ed25519@openssh.com'
     key :: % encoded key from eg ssh_host_*.pub
     ```
 
@@ -162,6 +170,10 @@ Clients uses all files stored in the [USERDIR](`m:ssh_file#USERDIR`) directory.
     (optional)
   - `id_ed448`{: #FILE-id_ed448 } \- private eddsa user key for curve 448
     (optional)
+  - `id_ecdsa_sk`{: #FILE-id_ecdsa_sk } \- private ecdsa-sk user key for
+    FIDO/U2F security keys (optional)
+  - `id_ed25519_sk`{: #FILE-id_ed25519_sk } \- private ed25519-sk user key for
+    FIDO/U2F security keys (optional)
 
   The key files could be generated with OpenSSH's ssh-keygen command.
 

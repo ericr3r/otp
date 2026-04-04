@@ -264,6 +264,46 @@ handling plugin `m:ssh_file`. The alternatives are:
   [`pk_check_user`](`m:ssh#option-pk_check_user`) to `true`. In that case the
   pwdfun will get the atom `pubkey` in the password argument.
 
+## FIDO Security Key Verification Policy
+
+When accepting FIDO/U2F security key authentication (`ecdsa-sk` or
+`ed25519-sk` keys from OpenSSH clients), additional policy can be applied via
+the `sk_fido_verify_fun` daemon option. This callback is invoked after
+cryptographic verification succeeds and receives a map containing the
+authenticator flags, signature counter, user presence status, and other
+FIDO-specific fields.
+
+Common hardening policies:
+
+- **Require user presence** — reject authentication if the user did not
+  physically touch the security key.  This prevents automated use of a key
+  that was left plugged in:
+
+  ```erlang
+  {sk_fido_verify_fun,
+   fun(#{user_presence := true}) -> ok;
+      (_) -> {error, no_user_presence}
+   end}
+  ```
+
+- **Require user verification** — require PIN or biometric verification in
+  addition to physical touch:
+
+  ```erlang
+  {sk_fido_verify_fun,
+   fun(#{user_presence := true, user_verification := true}) -> ok;
+      (_) -> {error, verification_required}
+   end}
+  ```
+
+- **Counter tracking** — the FIDO counter is included in the callback map.
+  Applications can implement their own persistent counter tracking to detect
+  cloned tokens.  The Erlang SSH server does not enforce counter monotonicity
+  by default (nor does OpenSSH).
+
+See the [SSH Application](ssh_app.md#fido-u2f-security-key-support)
+documentation for the full list of fields in the callback map.
+
 ## Hardening in the cryptographic area
 
 ### Algorithm selection
