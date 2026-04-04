@@ -603,6 +603,7 @@ decode(Bin, auth_keys) when is_binary(Bin) ->
                                   <<"ssh-dss">>,
                                   <<"ecdsa-sha2-nistp">>,
                                   <<"ssh-ed">>,
+                                  %% FIDO/U2F security key types (prefix match)
                                   <<"sk-ecdsa-sha2-">>,
                                   <<"sk-ssh-ed25519">>
                                  ]) of
@@ -1270,6 +1271,7 @@ file_base_name(user,   'ssh-dss'            ) -> "id_dsa";
 file_base_name(user,   'ssh-ed25519'        ) -> "id_ed25519";
 file_base_name(user,   'ssh-ed448'          ) -> "id_ed448";
 file_base_name(user,   'ssh-rsa'            ) -> "id_rsa";
+%% SK file names follow OpenSSH convention (id_{alg}_sk for user, ssh_host_{alg}_sk_key for system)
 file_base_name(user,   'sk-ecdsa-sha2-nistp256@openssh.com') -> "id_ecdsa_sk";
 file_base_name(user,   'sk-ssh-ed25519@openssh.com') -> "id_ed25519_sk";
 file_base_name(system, 'ecdsa-sha2-nistp256') -> "ssh_host_ecdsa_key";

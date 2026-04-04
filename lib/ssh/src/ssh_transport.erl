@@ -231,6 +231,10 @@ supported_algorithms(kex) ->
 supported_algorithms(public_key) ->
     select_crypto_supported(
       [
+       %% FIDO/U2F security key types (server-side verification only).
+       %% Crypto capability is checked (ecdsa/eddsa), but actual FIDO
+       %% hardware is only needed for signing (client side, out of scope).
+       %% See OpenSSH PROTOCOL.u2f for the wire format specification.
        {'sk-ssh-ed25519@openssh.com',         [{public_keys,eddsa}, {curves,ed25519}]},
        {'sk-ecdsa-sha2-nistp256@openssh.com', [{public_keys,ecdsa}, {hashs,sha256}, {curves,secp256r1}]},
        {'ssh-ed25519',          [{public_keys,eddsa}, {curves,ed25519}                    ]},
@@ -1732,7 +1736,12 @@ do_verify(PlainText, HashAlg, Sig, #'RSAPublicKey'{}=Key, #ssh{role = server,
     public_key:verify(PlainText, HashAlg, Sig, Key)
         orelse public_key:verify(PlainText, sha, Sig, Key);
 
-%% ECDSA-SK: reconstruct authenticator data, verify ECDSA/P-256
+%% ECDSA-SK (FIDO/U2F): verify sk-ecdsa-sha2-nistp256@openssh.com signature.
+%% The signature Sig arriving here is: inner_ecdsa_sig || flags:8 || counter:32.
+%% inner_ecdsa_sig is variable-length (mpint r || mpint s), so we split from
+%% the tail.  See OpenSSH PROTOCOL.u2f §"signatures" for the wire format.
+%% Verification is performed over the 69-byte FIDO authenticator data blob,
+%% NOT over PlainText directly.
 do_verify(PlainText, sha256,
           Sig,
           {ecdsa_sk, #'ECPoint'{} = Q, secp256r1, Application},
@@ -1751,11 +1760,11 @@ do_verify(PlainText, sha256,
                   R:Rlen/big-signed-integer-unit:8,
                   ?UINT32(Slen),
                   S:Slen/big-signed-integer-unit:8>> ->
-                    Sval = #'ECDSA-Sig-Value'{r = R, s = S},
-                    DerSig = public_key:der_encode(
+                    Sval = #'ECDSA-Sig-Value'{r=R, s=S},
+                    DerEncodedSig = public_key:der_encode(
                                'ECDSA-Sig-Value', Sval),
                     public_key:verify(
-                      AuthData, sha256, DerSig,
+                      AuthData, sha256, DerEncodedSig,
                       {Q, {namedCurve, secp256r1}});
                 _ ->
                     false
@@ -1764,7 +1773,10 @@ do_verify(PlainText, sha256,
             false
     end;
 
-%% Ed25519-SK: reconstruct authenticator data, verify Ed25519
+%% Ed25519-SK (FIDO/U2F): verify sk-ssh-ed25519@openssh.com signature.
+%% The signature Sig is: inner_ed25519_sig(64 bytes) || flags:8 || counter:32.
+%% Inner Ed25519 signatures are always 64 bytes, so direct pattern match works.
+%% See OpenSSH PROTOCOL.u2f §"signatures" for the wire format.
 do_verify(PlainText, undefined,
           Sig,
           {ed25519_sk, PubKey, Application},
@@ -1789,7 +1801,7 @@ do_verify(PlainText, HashAlg, Sig, Key, _) ->
 
 
 %%%----------------------------------------------------------------
-%%% Construct the 69-byte FIDO authenticator data blob:
+%%% Construct the FIDO authenticator data blob (69 bytes with SHA-256):
 %%%   SHA-256(application) || flags:8 || counter:32 || SHA-256(M)
 %%% Used by both ECDSA-SK and Ed25519-SK verification.
 %%%----------------------------------------------------------------
@@ -2342,6 +2354,8 @@ valid_key_sha_alg(public, {#'ECPoint'{},{namedCurve,OID}}, Alg) ->
 valid_key_sha_alg(private, #'ECPrivateKey'{parameters = {namedCurve,OID}}, Alg) ->
     valid_key_sha_alg_ec(OID, Alg);
 
+%% SK key types — public only (no private clauses needed; the private
+%% key lives on the FIDO hardware token and is never seen by OTP).
 valid_key_sha_alg(public, {ecdsa_sk, #'ECPoint'{}, secp256r1, _},
                   'sk-ecdsa-sha2-nistp256@openssh.com') -> true;
 valid_key_sha_alg(public, {ed25519_sk, _, _},
@@ -2370,7 +2384,7 @@ public_algo({#'ECPoint'{},{namedCurve,OID}}) when is_tuple(OID) ->
 
 
 sha('sk-ecdsa-sha2-nistp256@openssh.com') -> sha256;
-sha('sk-ssh-ed25519@openssh.com')         -> undefined; % Ed25519 is prehashed
+sha('sk-ssh-ed25519@openssh.com')         -> undefined; % Ed25519 has internal hashing (SHA-512)
 sha('ssh-rsa') -> sha;
 sha('rsa-sha2-256') -> sha256;
 sha('rsa-sha2-384') -> sha384;

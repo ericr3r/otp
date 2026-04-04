@@ -518,11 +518,21 @@ pre_verify_sig(User, KeyBlob, #ssh{opts = Opts}) ->
             false
     end.
 
-verify_sig(SessionId, User, Service, BAlg, KeyBlob, SigWLen, #ssh{opts = Opts} = Ssh)
-    when BAlg =:= <<"sk-ecdsa-sha2-nistp256@openssh.com">>;
-         BAlg =:= <<"sk-ssh-ed25519@openssh.com">> ->
+%% FIDO/U2F security key signature verification.
+%%
+%% SK signature wire format (OpenSSH PROTOCOL.u2f §"signatures"):
+%%   string   algorithm-name
+%%   string   inner-signature  (ECDSA mpint r||s, or Ed25519 64 bytes)
+%%   byte     flags            (bit 0: UP user-presence, bit 2: UV user-verified)
+%%   uint32   counter          (monotonic signature counter)
+%%
+%% After cryptographic verification, the optional sk_fido_verify_fun
+%% callback is invoked for policy enforcement (e.g. require touch).
+verify_sig(SessionId, User, Service, AlgBin, KeyBlob, SigWLen, #ssh{opts = Opts} = Ssh)
+    when AlgBin =:= <<"sk-ecdsa-sha2-nistp256@openssh.com">>;
+         AlgBin =:= <<"sk-ssh-ed25519@openssh.com">> ->
     try
-        Alg = binary_to_list(BAlg),
+        Alg = binary_to_list(AlgBin),
         true =
             lists:member(list_to_existing_atom(Alg),
                          proplists:get_value(public_key, ?GET_OPT(preferred_algorithms, Opts))),
@@ -537,6 +547,7 @@ verify_sig(SessionId, User, Service, BAlg, KeyBlob, SigWLen, #ssh{opts = Opts} =
           InnerSig:SigLen/binary,
           FlagsAndCounter/binary>> =
             AlgSig,
+        %% Reassemble for do_verify, which expects inner_sig || flags || counter
         Sig = <<InnerSig/binary, FlagsAndCounter/binary>>,
         %% Extract flags and counter from the last 5 bytes of Sig
         %% (do_verify also splits them this way).  The 5-byte tail is
@@ -558,8 +569,8 @@ verify_sig(SessionId, User, Service, BAlg, KeyBlob, SigWLen, #ssh{opts = Opts} =
                 FidoInfo =
                     #{flags => Flags,
                       counter => Counter,
-                      user_presence => Flags band 16#01 =/= 0,
-                      user_verification => Flags band 16#04 =/= 0,
+                      user_presence => Flags band 16#01 =/= 0,      % FIDO UP flag
+                      user_verification => Flags band 16#04 =/= 0,  % FIDO UV flag
                       user => User,
                       algorithm => list_to_existing_atom(Alg)},
                 case ?GET_OPT(sk_fido_verify_fun, Opts) of
@@ -610,10 +621,8 @@ build_sig_data(SessionId, User, Service, KeyBlob, Alg) ->
            ?binary(KeyBlob)],
     list_to_binary(Sig).
 
-key_alg('sk-ecdsa-sha2-nistp256@openssh.com') ->
-    'sk-ecdsa-sha2-nistp256@openssh.com';
-key_alg('sk-ssh-ed25519@openssh.com') ->
-    'sk-ssh-ed25519@openssh.com';
+%% SK algorithms: key type == signature algorithm (identity mapping),
+%% handled by the catch-all clause below.
 key_alg('rsa-sha2-256') ->
     'ssh-rsa';
 key_alg('rsa-sha2-512') ->
