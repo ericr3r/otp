@@ -36,8 +36,8 @@
          publickey_msg/1, password_msg/1, keyboard_interactive_msg/1,
 	 service_request_msg/1, init_userauth_request_msg/1,
 	 userauth_request_msg/1, handle_userauth_request/3, ssh_msg_userauth_result/1,
-	 handle_userauth_info_request/2, handle_userauth_info_response/2,
-	 build_sig_data/5
+         handle_userauth_info_request/2, handle_userauth_info_response/2,
+         build_sig_data/5
 	]).
 
 -behaviour(ssh_dbg).

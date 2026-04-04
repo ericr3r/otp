@@ -128,7 +128,7 @@ Clients uses all files stored in the [USERDIR](`m:ssh_file#USERDIR`) directory.
              | 'ssh-ed25519'
     	 | 'ssh-ed448'
              | 'sk-ecdsa-sha2-nistp256@openssh.com'
-    	 | 'sk-ssh-ed25519@openssh.com'
+         | 'sk-ssh-ed25519@openssh.com'
     base64-encoded-key :: % The user's public key
     comment :: % Comments are skipped
     ```
@@ -158,7 +158,7 @@ Clients uses all files stored in the [USERDIR](`m:ssh_file#USERDIR`) directory.
              | 'ssh-ed25519'
     	 | 'ssh-ed448'
              | 'sk-ecdsa-sha2-nistp256@openssh.com'
-    	 | 'sk-ssh-ed25519@openssh.com'
+         | 'sk-ssh-ed25519@openssh.com'
     key :: % encoded key from eg ssh_host_*.pub
     ```
 
