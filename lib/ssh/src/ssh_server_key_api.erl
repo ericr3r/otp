@@ -66,10 +66,21 @@ is available with the key `key_cb_private`.
 %%%****************************************************************
 %%% Check that PublicKey is known to be a public key for the User
 
--doc "Checks if the user key is authorized.".
+-doc """
+Checks if the user key is authorized.
+
+May return `{true, KeyOptions}` instead of `true` to pass per-key
+options from `authorized_keys` through to FIDO/U2F policy checks.
+For example, a key line starting with `no-touch-required` will
+produce `{true, ["no-touch-required"]}`, which relaxes the default
+user-presence requirement for FIDO security keys.
+
+Implementations that return plain `boolean()` continue to work
+unchanged — the server treats `true` as equivalent to `{true, []}`.
+""".
 -doc(#{since => <<"OTP R16B">>}).
 -callback is_auth_key(PublicKey :: public_key:public_key(),
 		      User :: string(),
 		      DaemonOptions :: daemon_key_cb_options(any())
                      ) ->
-    boolean().
+    boolean() | {true, KeyOptions :: proplists:proplist()}.

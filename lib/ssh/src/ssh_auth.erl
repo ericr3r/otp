@@ -512,7 +512,12 @@ get_password_option(Opts, User) ->
 pre_verify_sig(User, KeyBlob, #ssh{opts = Opts}) ->
     try
         Key = ssh_message:ssh2_pubkey_decode(KeyBlob), % or exception
-        ssh_transport:call_KeyCb(is_auth_key, [Key, User], Opts)
+        case ssh_transport:call_KeyCb(is_auth_key, [Key, User], Opts) of
+            {true, _KeyOpts} ->
+                true;
+            Other ->
+                Other
+        end
     catch
         _:_ ->
             false
@@ -537,7 +542,19 @@ verify_sig(SessionId, User, Service, AlgBin, KeyBlob, SigWLen, #ssh{opts = Opts}
             lists:member(list_to_existing_atom(Alg),
                          proplists:get_value(public_key, ?GET_OPT(preferred_algorithms, Opts))),
         Key = ssh_message:ssh2_pubkey_decode(KeyBlob),
-        true = ssh_transport:call_KeyCb(is_auth_key, [Key, User], Opts),
+        %% is_auth_key may return true | {true, KeyOpts} | false.
+        %% Normalize to {true, KeyOpts} for the SK path so we can
+        %% thread per-key authorized_keys options (e.g. no-touch-required)
+        %% into the FIDO policy check.
+        KeyOpts =
+            case ssh_transport:call_KeyCb(is_auth_key, [Key, User], Opts) of
+                {true, KO} when is_list(KO) ->
+                    KO;
+                true ->
+                    [];
+                _ ->
+                    throw(not_authorized)
+            end,
         PlainText = build_sig_data(SessionId, User, Service, KeyBlob, Alg),
         <<?UINT32(AlgSigLen), AlgSig:AlgSigLen/binary>> = SigWLen,
         %% SK sigs: alg_name || inner_sig_string || flags_byte || counter_u32
@@ -567,27 +584,35 @@ verify_sig(SessionId, User, Service, AlgBin, KeyBlob, SigWLen, #ssh{opts = Opts}
             true ->
                 %% Crypto verification succeeded; now enforce FIDO policy.
                 %%
-                %% OpenSSH requires user presence (UP, flag bit 0x01) by
-                %% default for all SK signatures.  The only way to relax
-                %% this is the "no-touch-required" authorized_keys option,
-                %% which we model via the sk_fido_verify_fun callback
-                %% returning `ok' even when UP is false.
+                %% OpenSSH checks per-key options from authorized_keys to
+                %% decide whether user presence is required.  The default
+                %% is PUBKEYAUTH_TOUCH_REQUIRED; the "no-touch-required"
+                %% option on an authorized_keys line relaxes it for that
+                %% specific key.
                 %%
-                %% When no callback is configured we mirror OpenSSH's
-                %% default: require UP=1.
+                %% We mirror this: KeyOpts from is_auth_key carries the
+                %% per-key options.  When no callback is configured we
+                %% enforce UP unless the key has "no-touch-required".
+                %% When a callback IS configured it gets both the FIDO
+                %% flags and the per-key options and can make its own
+                %% decision.
                 UserPresence = Flags band 16#01 =/= 0,
+                NoTouchRequired = lists:member("no-touch-required", KeyOpts),
                 FidoInfo =
                     #{flags => Flags,
                       counter => Counter,
                       user_presence => UserPresence,
                       user_verification => Flags band 16#04 =/= 0,  % FIDO UV flag
                       user => User,
-                      algorithm => list_to_existing_atom(Alg)},
+                      algorithm => list_to_existing_atom(Alg),
+                      key => Key,
+                      key_options => KeyOpts},
                 case ?GET_OPT(sk_fido_verify_fun, Opts) of
                     undefined ->
                         %% No policy callback — enforce UP by default,
-                        %% matching OpenSSH's PUBKEYAUTH_TOUCH_REQUIRED.
-                        UserPresence;
+                        %% matching OpenSSH's PUBKEYAUTH_TOUCH_REQUIRED,
+                        %% unless this key has "no-touch-required".
+                        NoTouchRequired orelse UserPresence;
                     VerifyFun when is_function(VerifyFun, 1) ->
                         case VerifyFun(FidoInfo) of
                             ok ->
@@ -612,7 +637,16 @@ verify_sig(SessionId, User, Service, AlgBin, KeyBlob, SigWLen, #ssh{opts = Opts}
             lists:member(list_to_existing_atom(Alg),
                          proplists:get_value(public_key, ?GET_OPT(preferred_algorithms, Opts))),
         Key = ssh_message:ssh2_pubkey_decode(KeyBlob), % or exception
-        true = ssh_transport:call_KeyCb(is_auth_key, [Key, User], Opts),
+        %% Normalize is_auth_key return for backward compatibility:
+        %% accept true | {true, _KeyOpts} — options are only used by the
+        %% SK clause above; non-SK keys just need the boolean.
+        true =
+            case ssh_transport:call_KeyCb(is_auth_key, [Key, User], Opts) of
+                {true, _} ->
+                    true;
+                Other ->
+                    Other
+            end,
         PlainText = build_sig_data(SessionId, User, Service, KeyBlob, Alg),
         <<?UINT32(AlgSigLen), AlgSig:AlgSigLen/binary>> = SigWLen,
         <<?UINT32(AlgLen), _Alg:AlgLen/binary, ?UINT32(SigLen), Sig:SigLen/binary>> = AlgSig,

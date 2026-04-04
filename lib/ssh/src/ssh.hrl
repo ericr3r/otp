@@ -1015,17 +1015,22 @@ callback is invoked with a map containing:
 - `user` — the authenticating username (string)
 - `algorithm` — the negotiated algorithm atom
   (`'sk-ecdsa-sha2-nistp256@openssh.com'` or `'sk-ssh-ed25519@openssh.com'`)
+- `key` — the decoded public key that was used for authentication
+- `key_options` — per-key options from `authorized_keys` (list of strings,
+  e.g. `["no-touch-required"]`).  Empty list when the key line has no options
+  or when `is_auth_key/3` returned plain `true`.
 
 Return `ok` to allow authentication, or `{error, Reason}` to reject.
 
 **Default behaviour (when `undefined`):** User presence (UP, the
-authenticator touch flag) is required.  Signatures that do not have the
-UP bit set are rejected, matching OpenSSH's default
-`PUBKEYAUTH_TOUCH_REQUIRED` policy.
+authenticator touch flag) is required unless the key's `authorized_keys`
+line includes the `no-touch-required` option.  This matches OpenSSH's
+default `PUBKEYAUTH_TOUCH_REQUIRED` policy with per-key override.
 
-To **relax** this requirement (equivalent to OpenSSH's
-`no-touch-required` authorized_keys option), supply a callback that
-returns `ok` regardless of the `user_presence` value.
+When a callback IS configured, it receives the full `key_options` list
+and can implement its own policy.  The `no-touch-required` option is
+NOT automatically honoured when a callback is present — the callback
+has full control.
 
 To **tighten** the policy (e.g. also require user verification / PIN),
 check the `user_verification` field and return `{error, Reason}` when
@@ -1040,7 +1045,9 @@ it is `false`.
                           user_presence := boolean(),
                           user_verification := boolean(),
                           user := string(),
-                          algorithm := atom()}.
+                          algorithm := atom(),
+                          key := public_key:public_key(),
+                          key_options := [string()]}.
 
 -doc(#{group => <<"Daemon Options">>}).
 -type prompt_texts() ::

@@ -333,9 +333,17 @@ is_auth_key(Key0, User, Opts) ->
     KeyType = normalize_alg(
                 erlang:atom_to_binary(ssh_transport:public_algo(Key0), latin1)),
     Key = encode_key(Key0),
-    lookup_auth_keys(KeyType, Key, filename:join(Dir,"authorized_keys"), Opts)
-        orelse
-        lookup_auth_keys(KeyType, Key, filename:join(Dir,"authorized_keys2"), Opts).
+    case lookup_auth_keys(KeyType, Key, filename:join(Dir,"authorized_keys"), Opts) of
+        {true, KeyOpts} ->
+            {true, KeyOpts};
+        false ->
+            case lookup_auth_keys(KeyType, Key, filename:join(Dir,"authorized_keys2"), Opts) of
+                {true, KeyOpts2} ->
+                    {true, KeyOpts2};
+                false ->
+                    false
+            end
+    end.
 
 %%%---------------- CLIENT API ------------------------------------
 -doc """
@@ -794,10 +802,14 @@ find_key(KeyType, Key, [Line | Lines]) ->
         [E1,E2|Es] = binary:split(Line, <<" ">>, [global,trim_all]),
         [normalize_alg(E1), normalize_alg(E2) | Es] % KeyType is in first or second element
     of
-        [_Options, KeyType, Key | _Comment] ->
-            true;
+        [Options, KeyType, Key | _Comment] when is_binary(Options) ->
+            %% Line has options prefix before key type.
+            %% Options are comma-separated (e.g. "no-touch-required,restrict").
+            ParsedOpts = [binary_to_list(O)
+                          || O <- binary:split(Options, <<",">>, [global, trim_all])],
+            {true, ParsedOpts};
         [KeyType, Key | _Comment] ->
-            true;
+            {true, []};
         _ ->
             find_key(KeyType, Key, Lines)
     catch
