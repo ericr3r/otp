@@ -545,14 +545,18 @@ decode(KeyBin, Type) when is_binary(KeyBin) andalso
     end;
 
 decode(KeyBin0, openssh_key) when is_binary(KeyBin0) ->
-    %% Ex: <<"ssh-rsa AAAAB12....3BC someone@example.com">>
+    %% One-liner format: "keytype base64-key comment..."
+    %% The comment field continues to end of line and may contain spaces.
+    %% See sshd(8) AUTHORIZED_KEYS and SSH_KNOWN_HOSTS FILE FORMAT.
     try
         [begin
              [_,K|Rest] = binary:split(Line, <<" ">>, [global,trim_all]),
              Key = ssh_message:ssh2_pubkey_decode(base64:decode(K)),
              case Rest of
-                 [Comment] -> {Key, [{comment,binary_to_list(Comment)}]};
-                 [] -> {Key,[]}
+                 [] -> {Key,[]};
+                 _ ->
+                     Comment = lists:join(" ", [binary_to_list(R) || R <- Rest]),
+                     {Key, [{comment, lists:flatten(Comment)}]}
              end
          end || Line <- split_in_nonempty_lines(KeyBin0)
         ]
