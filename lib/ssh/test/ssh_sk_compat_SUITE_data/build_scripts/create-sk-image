@@ -80,7 +80,6 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
         zlib1g-dev \
         libssl-dev \
         libpam0g-dev \
-        libfido2-dev \
         sshpass \
         sudo \
         iputils-ping \
@@ -105,37 +104,36 @@ WORKDIR /buildroot
 COPY openssh-${OPENSSH_VER}.tar.gz .
 RUN tar xf openssh-${OPENSSH_VER}.tar.gz
 
-# Build OpenSSH with security key support
+# Build OpenSSH — SK key types are supported by default in OpenSSH >= 8.2.
+# We do NOT use --with-security-key-builtin (requires a working libfido2
+# shared library at configure time).  Instead we build sk-dummy.so as an
+# external middleware loaded at runtime via SSH_SK_PROVIDER.
 WORKDIR /buildroot/openssh-${OPENSSH_VER}
 
 RUN ./configure \
         --prefix=/buildroot/ssh \
         --with-pam \
-        --with-security-key-builtin \
     && make -j"$(nproc)" \
     && make install
 
-# Build sk-dummy.so from the regress test directory
-# sk-dummy.so is the software FIDO authenticator used for testing
-RUN cd regress/misc/sk-dummy \
-    && if [ -f Makefile ]; then \
-           make; \
-       else \
-           cc -shared -fPIC \
-              -I../../.. \
-              -I/buildroot/openssh-${OPENSSH_VER} \
-              -o sk-dummy.so sk-dummy.c \
-              -lcrypto; \
-       fi \
+# Build sk-dummy.so using the top-level OpenSSH Makefile.
+# The Makefile's SK_DUMMY_LIBRARY target handles all the complexity:
+# recompiling ed25519.c/hash.c with -fPIC, linking openbsd-compat,
+# and resolving all internal symbols (crypto_sign_ed25519,
+# arc4random_buf, etc.).  This is far more reliable than trying to
+# replicate the build by hand.
+RUN make regress/misc/sk-dummy/sk-dummy.so \
     && mkdir -p /buildroot/ssh/lib \
-    && cp sk-dummy.so /buildroot/ssh/lib/sk-dummy.so
+    && cp regress/misc/sk-dummy/sk-dummy.so /buildroot/ssh/lib/sk-dummy.so
 
-# Verify sk-dummy.so was built
+# Verify sk-dummy.so was built and all symbols resolve
 RUN ls -la /buildroot/ssh/lib/sk-dummy.so \
+    && ldd /buildroot/ssh/lib/sk-dummy.so \
     && echo "sk-dummy.so built successfully"
 
 # Generate host keys
-RUN /buildroot/ssh/bin/ssh-keygen -A -f /buildroot
+RUN mkdir -p /buildroot/ssh/etc \
+    && /buildroot/ssh/bin/ssh-keygen -A
 
 # Configure sshd for FIDO testing
 RUN cat >> /buildroot/ssh/etc/sshd_config <<'SSHD_EOF'

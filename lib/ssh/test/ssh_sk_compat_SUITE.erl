@@ -72,12 +72,12 @@
 -define(USER, "sshtester").
 -define(PASSWD, "foobar").
 -define(BAD_PASSWD, "NOT-foobar").
--define(SK_DUMMY_COUNTER, 16#12345678). % sk-dummy.so hardcodes this counter
+-define(SK_DUMMY_COUNTER, 16#12345678).  % sk-dummy.so hardcodes this counter
 -define(SK_DUMMY_PATH, "/buildroot/ssh/lib/sk-dummy.so").
 
-%%--------------------------------------------------------------------
+%%====================================================================
 %% Common Test interface
-%%--------------------------------------------------------------------
+%%====================================================================
 
 suite() ->
     [{timetrap, {seconds, 120}}].
@@ -104,7 +104,13 @@ groups() ->
        sk_flags_propagated]}].
 
 %%--------------------------------------------------------------------
-init_per_suite( Config ) -> ?CHECK_CRYPTO( case os : find_executable( "docker" ) of false -> { skip , "Docker not found" } ; _DockerPath -> case docker_available( ) of false -> { skip , "Docker daemon not running" } ; true -> case sk_image_available( ) of false -> { skip , "Docker image " ?DOCKER_IMAGE ":" ?DOCKER_TAG " not found. Build it with: " "lib/ssh/test/ssh_sk_compat_SUITE_data/" "build_scripts/create-sk-image" } ; true -> ssh : start( ) , ct : log( "Docker SK image available" ) , ct : log( "Crypto info: ~p" , [ crypto : info_lib( ) ] ) , Config end end end ) .
+%% Force-load our project's modified SSH modules.
+%% When ssh:start() loads the ssh application, the system's ssh
+%% modules are used (from the installed OTP).  Our project adds
+%% SK (FIDO) support to ssh_file, ssh_message, ssh_transport,
+%% ssh_auth, and ssh_options, so we must replace the system
+%% versions with ours after the application starts.
+init_per_suite( Config ) -> ?CHECK_CRYPTO( case os : find_executable( "docker" ) of false -> { skip , "Docker not found" } ; _DockerPath -> case docker_available( ) of false -> { skip , "Docker daemon not running" } ; true -> case sk_image_available( ) of false -> { skip , "Docker image " ?DOCKER_IMAGE ":" ?DOCKER_TAG " not found. Build it with: " "lib/ssh/test/ssh_sk_compat_SUITE_data/" "build_scripts/create-sk-image" } ; true -> DataDir = proplists : get_value( data_dir , Config ) , TestDir = filename : dirname( filename : dirname( DataDir ) ) , SshDir = filename : dirname( TestDir ) , ProjectEbin = filename : join( SshDir , "ebin" ) , ct : log( "Adding project ebin to code path: ~s" , [ ProjectEbin ] ) , true = code : add_patha( ProjectEbin ) =/= { error , bad_directory } , ssh : start( ) , ForceLoad = [ ssh_file , ssh_message , ssh_transport , ssh_auth , ssh_options ] , lists : foreach( fun ( Mod ) -> code : purge( Mod ) , { module , Mod } = code : load_file( Mod ) , ct : log( "Loaded ~p from ~p" , [ Mod , code : which( Mod ) ] ) end , ForceLoad ) , ct : log( "Docker SK image available" ) , ct : log( "Crypto info: ~p" , [ crypto : info_lib( ) ] ) , Config end end end ) .
 
 end_per_suite(_Config) ->
     catch ssh:stop(),
@@ -156,13 +162,13 @@ end_per_testcase(_TC, _Config) ->
 check_docker_sk_present(_Config) ->
     true = docker_available(),
     true = sk_image_available(),
-    %% Verify the image has sk-dummy.so
-    {ok, Output} =
-        docker_run_cmd(?DOCKER_IMAGE ++ ":" ++ ?DOCKER_TAG,
-                       "for p in /buildroot/ssh/lib/sk-dummy.so /buildroot/ssh/libexec/sk-du"
-                       "mmy.so; do test -f $p && echo SK_DUMMY_OK && exit 0; done; "
-                       "echo SK_DUMMY_MISSING"),
-    case binary:match(list_to_binary(Output), <<"SK_DUMMY_OK">>) of
+    %% Verify the image has sk-dummy.so in one of the expected paths
+    CheckCmd =
+        "for p in /buildroot/ssh/lib/sk-dummy.so /buildroot/ssh/libexec/sk-du"
+        "mmy.so; do test -f $p && echo SK_DUMMY_OK && exit 0; done; "
+        "echo SK_DUMMY_MISSING",
+    {ok, Output} = docker_run_cmd(?DOCKER_IMAGE ++ ":" ++ ?DOCKER_TAG, CheckCmd),
+    case binary:match(iolist_to_binary(Output), <<"SK_DUMMY_OK">>) of
         nomatch ->
             ct:fail("sk-dummy.so not found in Docker image");
         _ ->
@@ -182,7 +188,7 @@ sk_keygen_ecdsa_in_docker(Config) ->
 sk_keygen_ed25519_in_docker(Config) ->
     sk_keygen_in_docker(Config, "ed25519-sk", "id_ed25519_sk").
 
-sk_keygen_in_docker( Config , KeyType , ExpectedFile ) -> Cmd = lists : flatten( io_lib : format( "SSH_SK_PROVIDER=" ?SK_DUMMY_PATH " /buildroot/ssh/bin/ssh-keygen" " -t ~s -f /tmp/~s -N '' -q" " && cat /tmp/~s.pub" , [ KeyType , ExpectedFile , ExpectedFile ] ) ) , case exec_in_docker( Config , Cmd ) of { ok , { 0 , PubKeyData } } -> ct : log( "Generated ~s key:~n~s" , [ KeyType , PubKeyData ] ) , [ { Key , _Attrs } ] = ssh_file : decode( PubKeyData , public_key ) , ct : log( "Decoded key: ~p" , [ Key ] ) , verify_sk_key_type( KeyType , Key ) , ok ; { ok , { ExitStatus , Output } } -> ct : fail( "ssh-keygen failed with exit ~p: ~s" , [ ExitStatus , Output ] ) ; { error , Reason } -> ct : fail( "exec_in_docker failed: ~p" , [ Reason ] ) end .
+sk_keygen_in_docker( Config , KeyType , ExpectedFile ) -> Cmd = lists : flatten( io_lib : format( "rm -f /tmp/~s /tmp/~s.pub; " "SSH_SK_PROVIDER=" ?SK_DUMMY_PATH " /buildroot/ssh/bin/ssh-keygen" " -t ~s -f /tmp/~s -N '' -q" " && cat /tmp/~s.pub" , [ ExpectedFile , ExpectedFile , KeyType , ExpectedFile , ExpectedFile ] ) ) , case exec_in_docker( Config , Cmd ) of { ok , { 0 , PubKeyData } } -> ct : log( "Generated ~s key:~n~s" , [ KeyType , PubKeyData ] ) , [ { Key , _Attrs } ] = ssh_file : decode( PubKeyData , public_key ) , ct : log( "Decoded key: ~p" , [ Key ] ) , verify_sk_key_type( KeyType , Key ) , ok ; { ok , { ExitStatus , Output } } -> ct : fail( "ssh-keygen failed with exit ~p: ~s" , [ ExitStatus , Output ] ) ; { error , Reason } -> ct : fail( "exec_in_docker failed: ~p" , [ Reason ] ) end .
     %% Run ssh-keygen inside the Docker container via docker exec
             %% Verify the public key can be parsed by our code
 
@@ -217,12 +223,12 @@ sk_login_otp_is_server(Config, KeyType, _AlgAtom) ->
 
     %% 3. Have the Docker OpenSSH client connect to our Erlang sshd
     try
-        HostStr = format_host(Host),
-        SshCmd = sk_ssh_cmd(KeyPrivPath, HostPort, HostStr, "echo AUTH_SUCCESS"),
+        HostStr = host_ip_for_docker(Host),
+        SshCmd = sk_ssh_cmd(KeyPrivPath, HostPort, HostStr, "io:format(\"AUTH_SUCCESS~n\")."),
         ct:log("SSH command: ~s", [SshCmd]),
         case exec_in_docker(Config, SshCmd) of
             {ok, {0, Output}} ->
-                case binary:match(list_to_binary(Output), <<"AUTH_SUCCESS">>) of
+                case binary:match(iolist_to_binary(Output), <<"AUTH_SUCCESS">>) of
                     nomatch ->
                         ct:fail("Auth succeeded but unexpected output: ~s", [Output]);
                     _ ->
@@ -235,7 +241,7 @@ sk_login_otp_is_server(Config, KeyType, _AlgAtom) ->
                 ct:fail("exec_in_docker failed: ~p", [Reason])
         end
     after
-        ssh:stop_daemon(Server)
+        catch ssh:stop_daemon(Server)
     end.
 
 %%--------------------------------------------------------------------
@@ -256,11 +262,11 @@ sk_login_fido_callback_enforced(Config) ->
     {Server, Host, HostPort, _SysDir, _UsrDir} =
         setup_otp_server_for_sk(Config, PubKeyBin, [{sk_fido_verify_fun, FidoFun}]),
     try
-        HostStr = format_host(Host),
-        SshCmd = sk_ssh_cmd(KeyPrivPath, HostPort, HostStr, "echo CALLBACK_TEST"),
+        HostStr = host_ip_for_docker(Host),
+        SshCmd = sk_ssh_cmd(KeyPrivPath, HostPort, HostStr, "io:format(\"CALLBACK_TEST~n\")."),
         case exec_in_docker(Config, SshCmd) of
             {ok, {0, _Output}} ->
-                %% Verify callback was invoked
+                %% Verify the callback was invoked with the right keys
                 receive
                     {fido_callback, Ref, FidoInfo} ->
                         ct:log("FIDO callback received: ~p", [FidoInfo]),
@@ -282,7 +288,7 @@ sk_login_fido_callback_enforced(Config) ->
                 ct:fail("exec failed: ~p", [Reason])
         end
     after
-        ssh:stop_daemon(Server)
+        catch ssh:stop_daemon(Server)
     end.
 
 %%--------------------------------------------------------------------
@@ -294,11 +300,15 @@ sk_login_fido_callback_rejects(Config) ->
     {Server, Host, HostPort, _SysDir, _UsrDir} =
         setup_otp_server_for_sk(Config, PubKeyBin, [{sk_fido_verify_fun, RejectFun}]),
     try
-        HostStr = format_host(Host),
-        SshCmd = sk_ssh_cmd_strict(KeyPrivPath, HostPort, HostStr, "echo SHOULD_NOT_APPEAR"),
+        HostStr = host_ip_for_docker(Host),
+        SshCmd =
+            sk_ssh_cmd_strict(KeyPrivPath,
+                              HostPort,
+                              HostStr,
+                              "io:format(\"SHOULD_NOT_APPEAR~n\")."),
         case exec_in_docker(Config, SshCmd) of
             {ok, {0, Output}} ->
-                case binary:match(list_to_binary(Output), <<"SHOULD_NOT_APPEAR">>) of
+                case binary:match(iolist_to_binary(Output), <<"SHOULD_NOT_APPEAR">>) of
                     nomatch ->
                         %% Connected but command didn't echo — edge case
                         ok;
@@ -313,7 +323,7 @@ sk_login_fido_callback_rejects(Config) ->
                 ok
         end
     after
-        ssh:stop_daemon(Server)
+        catch ssh:stop_daemon(Server)
     end.
 
 %%--------------------------------------------------------------------
@@ -326,11 +336,15 @@ sk_login_wrong_key_rejected(Config) ->
     %% Set up server with key 1, but client will use key 2
     {Server, Host, HostPort, _SysDir, _UsrDir} = setup_otp_server_for_sk(Config, PubKeyBin1),
     try
-        HostStr = format_host(Host),
-        SshCmd = sk_ssh_cmd_strict(KeyPrivPath2, HostPort, HostStr, "echo WRONG_KEY_WORKED"),
+        HostStr = host_ip_for_docker(Host),
+        SshCmd =
+            sk_ssh_cmd_strict(KeyPrivPath2,
+                              HostPort,
+                              HostStr,
+                              "io:format(\"WRONG_KEY_WORKED~n\")."),
         case exec_in_docker(Config, SshCmd) of
             {ok, {0, Output}} ->
-                case binary:match(list_to_binary(Output), <<"WRONG_KEY_WORKED">>) of
+                case binary:match(iolist_to_binary(Output), <<"WRONG_KEY_WORKED">>) of
                     nomatch ->
                         ok;
                     _ ->
@@ -343,16 +357,13 @@ sk_login_wrong_key_rejected(Config) ->
                 ok
         end
     after
-        ssh:stop_daemon(Server)
+        catch ssh:stop_daemon(Server)
     end.
 
 %%--------------------------------------------------------------------
-%% @doc Verify fallback from SK to password auth when SK key is not authorized.
-sk_login_password_fallback_from_sk( Config ) -> { KeyPrivPath , _PubKeyBin } = generate_sk_key_in_docker( Config , "ecdsa-sk" ) , PrivDir = proplists : get_value( priv_dir , Config ) , SysDir = new_dir( PrivDir , "sys" ) , UsrDir = new_dir( PrivDir , "usr" ) , ok = ssh_test_lib : setup_all_host_keys( SysDir ) , ok = file : write_file( filename : join( UsrDir , "authorized_keys" ) , << >> ) , { Server , Host , HostPort } = ssh_test_lib : daemon( 0 , [ { auth_methods , "publickey,password" } , { preferred_algorithms , ssh_transport : supported_algorithms( ) } , { system_dir , SysDir } , { user_dir , UsrDir } , { user_passwords , [ { ?USER , ?PASSWD } ] } , { failfun , fun ssh_test_lib : failfun/ 2 } ] ) , try HostStr = format_host( Host ) , SshCmd = lists : flatten( io_lib : format( "sshpass -p ~s" " SSH_SK_PROVIDER=" ?SK_DUMMY_PATH " /buildroot/ssh/bin/ssh" " -o StrictHostKeyChecking=no" " -o UserKnownHostsFile=/dev/null" " -o IdentityFile=~s" " -o PreferredAuthentications=publickey,password" " -o PubkeyAcceptedAlgorithms=+sk-ecdsa-sha2-nistp256@openssh.com,sk-ssh-ed25519@openssh.com" " -p ~p ~s@~s 'echo PASSWORD_FALLBACK'" , [ ?PASSWD , KeyPrivPath , HostPort , ?USER , HostStr ] ) ) , case exec_in_docker( Config , SshCmd ) of { ok , { 0 , Output } } -> case binary : match( list_to_binary( Output ) , << "PASSWORD_FALLBACK" >> ) of nomatch -> ct : fail( "Password fallback: unexpected output: ~s" , [ Output ] ) ; _ -> ct : log( "Password fallback worked after SK rejection" ) , ok end ; { ok , { ExitStatus , Output } } -> ct : fail( "Password fallback failed (exit ~p): ~s" , [ ExitStatus , Output ] ) ; { error , Reason } -> ct : fail( "exec failed: ~p" , [ Reason ] ) end after ssh : stop_daemon( Server ) end .
-    %% Generate a key but don't put it in authorized_keys
-    %% Set up server with password auth enabled, no authorized SK keys
-
-    %% Empty authorized_keys
+%% @doc Verify fallback from SK to password auth when SK key is not
+%% authorized.
+sk_login_password_fallback_from_sk( Config ) -> { KeyPrivPath , _PubKeyBin } = generate_sk_key_in_docker( Config , "ecdsa-sk" ) , PrivDir = proplists : get_value( priv_dir , Config ) , SysDir = new_dir( PrivDir , "sys" ) , UsrDir = new_dir( PrivDir , "usr" ) , generate_host_keys( SysDir ) , ok = file : write_file( filename : join( UsrDir , "authorized_keys" ) , << >> ) , { Server , Host , HostPort } = ssh_test_lib : daemon( 0 , [ { auth_methods , "publickey,password" } , { preferred_algorithms , safe_algorithms( ) } , { system_dir , SysDir } , { user_dir , UsrDir } , { user_passwords , [ { ?USER , ?PASSWD } ] } , { failfun , fun ssh_test_lib : failfun/ 2 } ] ) , try HostStr = host_ip_for_docker( Host ) , SshCmd = lists : flatten( io_lib : format( "sshpass -p ~s" " env SSH_SK_PROVIDER=" ?SK_DUMMY_PATH " /buildroot/ssh/bin/ssh" " -o StrictHostKeyChecking=no" " -o UserKnownHostsFile=/dev/null" " -o IdentityFile=~s" " -o PreferredAuthentications=publickey,password" " -o PubkeyAcceptedAlgorithms=" "+sk-ecdsa-sha2-nistp256@openssh.com," "sk-ssh-ed25519@openssh.com" " -p ~p ~s@~s 'io:format(\"PASSWORD_FALLBACK~n\").'" , [ ?PASSWD , KeyPrivPath , HostPort , ?USER , HostStr ] ) ) , case exec_in_docker( Config , SshCmd ) of { ok , { 0 , Output } } -> case binary : match( iolist_to_binary( Output ) , << "PASSWORD_FALLBACK" >> ) of nomatch -> ct : fail( "Password fallback: unexpected output: ~s" , [ Output ] ) ; _ -> ct : log( "Password fallback worked after SK rejection" ) , ok end ; { ok , { ExitStatus , Output } } -> ct : fail( "Password fallback failed (exit ~p): ~s" , [ ExitStatus , Output ] ) ; { error , Reason } -> ct : fail( "exec failed: ~p" , [ Reason ] ) end after catch ssh : stop_daemon( Server ) end .
 
 %%====================================================================
 %% Test Cases: Advanced SK Tests
@@ -363,12 +374,12 @@ sk_exec_after_sk_auth(Config) ->
     {KeyPrivPath, PubKeyBin} = generate_sk_key_in_docker(Config, "ecdsa-sk"),
     {Server, Host, HostPort, _SysDir, _UsrDir} = setup_otp_server_for_sk(Config, PubKeyBin),
     try
-        HostStr = format_host(Host),
+        HostStr = host_ip_for_docker(Host),
         %% Execute an Erlang expression on the OTP sshd
         SshCmd = sk_ssh_cmd(KeyPrivPath, HostPort, HostStr, "lists:concat([\"Result=\", 2+3])."),
         case exec_in_docker(Config, SshCmd) of
             {ok, {0, Output}} ->
-                case binary:match(list_to_binary(Output), <<"Result=5">>) of
+                case binary:match(iolist_to_binary(Output), <<"Result=5">>) of
                     nomatch ->
                         ct:fail("Exec after SK auth: unexpected output: ~s", [Output]);
                     _ ->
@@ -381,16 +392,12 @@ sk_exec_after_sk_auth(Config) ->
                 ct:fail("exec failed: ~p", [Reason])
         end
     after
-        ssh:stop_daemon(Server)
+        catch ssh:stop_daemon(Server)
     end.
 
 %%--------------------------------------------------------------------
 %% @doc Verify SFTP works after SK authentication.
-sk_sftp_after_sk_auth( Config ) -> { KeyPrivPath , PubKeyBin } = generate_sk_key_in_docker( Config , "ed25519-sk" ) , PrivDir = proplists : get_value( priv_dir , Config ) , SftpRootDir = new_dir( PrivDir , "sftp_root" ) , SysDir = new_dir( PrivDir , "sys_sftp" ) , UsrDir = new_dir( PrivDir , "usr_sftp" ) , ok = ssh_test_lib : setup_all_host_keys( SysDir ) , AuthKeysFile = filename : join( UsrDir , "authorized_keys" ) , ok = file : write_file( AuthKeysFile , PubKeyBin ) , { Server , Host , HostPort } = ssh_test_lib : daemon( 0 , [ { auth_methods , "publickey" } , { preferred_algorithms , ssh_transport : supported_algorithms( ) } , { system_dir , SysDir } , { user_dir , UsrDir } , { failfun , fun ssh_test_lib : failfun/ 2 } , { subsystems , [ ssh_sftpd : subsystem_spec( [ { cwd , SftpRootDir } , { root , SftpRootDir } ] ) ] } ] ) , try HostStr = format_host( Host ) , TestContent = << "FIDO_SFTP_TEST_DATA_42" >> , TestFile = filename : join( SftpRootDir , "sk_test.txt" ) , ok = file : write_file( TestFile , TestContent ) , SshCmd = lists : flatten( io_lib : format( "SSH_SK_PROVIDER=" ?SK_DUMMY_PATH " /buildroot/ssh/bin/sftp" " -o StrictHostKeyChecking=no" " -o UserKnownHostsFile=/dev/null" " -o IdentityFile=~s" " -o PreferredAuthentications=publickey" " -o PubkeyAcceptedAlgorithms=+sk-ecdsa-sha2-nistp256@openssh.com,sk-ssh-ed25519@openssh.com" " -P ~p ~s@~s:/sk_test.txt /tmp/sk_downloaded.txt" " && cat /tmp/sk_downloaded.txt" , [ KeyPrivPath , HostPort , ?USER , HostStr ] ) ) , case exec_in_docker( Config , SshCmd ) of { ok , { 0 , Output } } -> case binary : match( list_to_binary( Output ) , << "FIDO_SFTP_TEST_DATA_42" >> ) of nomatch -> ct : log( "SFTP output: ~s" , [ Output ] ) , ct : log( "SFTP transfer completed (exit 0)" ) , ok ; _ -> ct : log( "SFTP after SK auth succeeded, content verified" ) , ok end ; { ok , { ExitStatus , Output } } -> ct : fail( "SFTP failed (exit ~p): ~s" , [ ExitStatus , Output ] ) ; { error , Reason } -> ct : fail( "exec failed: ~p" , [ Reason ] ) end after ssh : stop_daemon( Server ) end .
-
-        %% Create a test file for SFTP download
-
-                        %% sftp may not echo the cat content
+sk_sftp_after_sk_auth( Config ) -> { KeyPrivPath , PubKeyBin } = generate_sk_key_in_docker( Config , "ed25519-sk" ) , PrivDir = proplists : get_value( priv_dir , Config ) , SftpRootDir = new_dir( PrivDir , "sftp_root" ) , SysDir = new_dir( PrivDir , "sys_sftp" ) , UsrDir = new_dir( PrivDir , "usr_sftp" ) , generate_host_keys( SysDir ) , AuthKeysFile = filename : join( UsrDir , "authorized_keys" ) , ok = file : write_file( AuthKeysFile , PubKeyBin ) , { Server , Host , HostPort } = ssh_test_lib : daemon( 0 , [ { auth_methods , "publickey" } , { preferred_algorithms , safe_algorithms( ) } , { system_dir , SysDir } , { user_dir , UsrDir } , { failfun , fun ssh_test_lib : failfun/ 2 } , { subsystems , [ ssh_sftpd : subsystem_spec( [ { cwd , SftpRootDir } , { root , SftpRootDir } ] ) ] } ] ) , try HostStr = host_ip_for_docker( Host ) , TestContent = << "FIDO_SFTP_TEST_DATA_42" >> , TestFile = filename : join( SftpRootDir , "sk_test.txt" ) , ok = file : write_file( TestFile , TestContent ) , SshCmd = lists : flatten( io_lib : format( "SSH_SK_PROVIDER=" ?SK_DUMMY_PATH " /buildroot/ssh/bin/sftp" " -o StrictHostKeyChecking=no" " -o UserKnownHostsFile=/dev/null" " -o IdentityFile=~s" " -o PreferredAuthentications=publickey" " -o PubkeyAcceptedAlgorithms=" "+sk-ecdsa-sha2-nistp256@openssh.com," "sk-ssh-ed25519@openssh.com" " -P ~p ~s@~s:/sk_test.txt /tmp/sk_downloaded.txt" " && cat /tmp/sk_downloaded.txt" , [ KeyPrivPath , HostPort , ?USER , HostStr ] ) ) , case exec_in_docker( Config , SshCmd ) of { ok , { 0 , Output } } -> case binary : match( iolist_to_binary( Output ) , << "FIDO_SFTP_TEST_DATA_42" >> ) of nomatch -> ct : log( "SFTP output: ~s" , [ Output ] ) , ct : log( "SFTP transfer completed (exit 0)" ) , ok ; _ -> ct : log( "SFTP after SK auth succeeded, content verified" ) , ok end ; { ok , { ExitStatus , Output } } -> ct : fail( "SFTP failed (exit ~p): ~s" , [ ExitStatus , Output ] ) ; { error , Reason } -> ct : fail( "exec failed: ~p" , [ Reason ] ) end after catch ssh : stop_daemon( Server ) end .
 
 %%--------------------------------------------------------------------
 %% @doc Verify that the FIDO signature counter value from sk-dummy.so
@@ -408,8 +415,8 @@ sk_counter_increases(Config) ->
     {Server, Host, HostPort, _SysDir, _UsrDir} =
         setup_otp_server_for_sk(Config, PubKeyBin, [{sk_fido_verify_fun, FidoFun}]),
     try
-        HostStr = format_host(Host),
-        SshCmd = sk_ssh_cmd(KeyPrivPath, HostPort, HostStr, "echo COUNTER_TEST"),
+        HostStr = host_ip_for_docker(Host),
+        SshCmd = sk_ssh_cmd(KeyPrivPath, HostPort, HostStr, "io:format(\"COUNTER_TEST~n\")."),
         case exec_in_docker(Config, SshCmd) of
             {ok, {0, _Output}} ->
                 receive
@@ -427,7 +434,7 @@ sk_counter_increases(Config) ->
                 ct:fail("exec failed: ~p", [Reason])
         end
     after
-        ssh:stop_daemon(Server)
+        catch ssh:stop_daemon(Server)
     end.
 
 %%--------------------------------------------------------------------
@@ -445,8 +452,8 @@ sk_flags_propagated(Config) ->
     {Server, Host, HostPort, _SysDir, _UsrDir} =
         setup_otp_server_for_sk(Config, PubKeyBin, [{sk_fido_verify_fun, FidoFun}]),
     try
-        HostStr = format_host(Host),
-        SshCmd = sk_ssh_cmd(KeyPrivPath, HostPort, HostStr, "echo FLAGS_TEST"),
+        HostStr = host_ip_for_docker(Host),
+        SshCmd = sk_ssh_cmd(KeyPrivPath, HostPort, HostStr, "io:format(\"FLAGS_TEST~n\")."),
         case exec_in_docker(Config, SshCmd) of
             {ok, {0, _Output}} ->
                 receive
@@ -470,7 +477,7 @@ sk_flags_propagated(Config) ->
                 ct:fail("exec failed: ~p", [Reason])
         end
     after
-        ssh:stop_daemon(Server)
+        catch ssh:stop_daemon(Server)
     end.
 
 %%====================================================================
@@ -478,12 +485,13 @@ sk_flags_propagated(Config) ->
 %%====================================================================
 
 %% @doc Build an SSH command for SK authentication inside Docker.
-%% This version is lenient (no ConnectTimeout/NumberOfPasswordPrompts limits).
-sk_ssh_cmd( KeyPrivPath , HostPort , HostStr , RemoteCmd ) -> lists : flatten( io_lib : format( "SSH_SK_PROVIDER=" ?SK_DUMMY_PATH " /buildroot/ssh/bin/ssh" " -o StrictHostKeyChecking=no" " -o UserKnownHostsFile=/dev/null" " -o IdentityFile=~s" " -o PreferredAuthentications=publickey" " -o PubkeyAcceptedAlgorithms=+sk-ecdsa-sha2-nistp256@openssh.com,sk-ssh-ed25519@openssh.com" " -p ~p ~s@~s '~s'" , [ KeyPrivPath , HostPort , ?USER , HostStr , RemoteCmd ] ) ) .
+%% This version is lenient (no ConnectTimeout/NumberOfPasswordPrompts
+%% limits).
+sk_ssh_cmd( KeyPrivPath , HostPort , HostStr , RemoteCmd ) -> lists : flatten( io_lib : format( "SSH_SK_PROVIDER=" ?SK_DUMMY_PATH " /buildroot/ssh/bin/ssh" " -o StrictHostKeyChecking=no" " -o UserKnownHostsFile=/dev/null" " -o IdentityFile=~s" " -o PreferredAuthentications=publickey" " -o PubkeyAcceptedAlgorithms=" "+sk-ecdsa-sha2-nistp256@openssh.com," "sk-ssh-ed25519@openssh.com" " -p ~p ~s@~s '~s'" , [ KeyPrivPath , HostPort , ?USER , HostStr , RemoteCmd ] ) ) .
 
 %% @doc Build an SSH command for SK authentication with strict timeouts.
 %% Used for tests that expect authentication failure.
-sk_ssh_cmd_strict( KeyPrivPath , HostPort , HostStr , RemoteCmd ) -> lists : flatten( io_lib : format( "SSH_SK_PROVIDER=" ?SK_DUMMY_PATH " /buildroot/ssh/bin/ssh" " -o StrictHostKeyChecking=no" " -o UserKnownHostsFile=/dev/null" " -o IdentityFile=~s" " -o PreferredAuthentications=publickey" " -o PubkeyAcceptedAlgorithms=+sk-ecdsa-sha2-nistp256@openssh.com,sk-ssh-ed25519@openssh.com" " -o ConnectTimeout=10" " -o NumberOfPasswordPrompts=0" " -p ~p ~s@~s '~s'" , [ KeyPrivPath , HostPort , ?USER , HostStr , RemoteCmd ] ) ) .
+sk_ssh_cmd_strict( KeyPrivPath , HostPort , HostStr , RemoteCmd ) -> lists : flatten( io_lib : format( "SSH_SK_PROVIDER=" ?SK_DUMMY_PATH " /buildroot/ssh/bin/ssh" " -o StrictHostKeyChecking=no" " -o UserKnownHostsFile=/dev/null" " -o IdentityFile=~s" " -o PreferredAuthentications=publickey" " -o PubkeyAcceptedAlgorithms=" "+sk-ecdsa-sha2-nistp256@openssh.com," "sk-ssh-ed25519@openssh.com" " -o ConnectTimeout=10" " -o NumberOfPasswordPrompts=0" " -p ~p ~s@~s '~s'" , [ KeyPrivPath , HostPort , ?USER , HostStr , RemoteCmd ] ) ) .
 
 %%====================================================================
 %% Internal: Docker Operations
@@ -512,16 +520,31 @@ sk_image_available() ->
 
 %% @doc Start a Docker container from the SK image.
 %% Returns {ok, #{id, ip, ssh_port}} | {error, Reason}.
+%%
+%% We use --network=host so the container shares the host's network
+%% namespace.  This avoids Docker bridge firewall issues where TCP
+%% from the container to the host is blocked even though ICMP works.
+%% The container's sshd listens on port 1234 on the host, and we use
+%% docker exec (not SSH) to run commands inside the container, so the
+%% sshd port is only needed for the container's own use.
+%%
+%% Note: with --network=host the container's sshd binds to port 1234
+%% on the actual host.  The Erlang daemon binds to a random port, so
+%% there is no conflict.  The Docker SSH client inside the container
+%% connects to 127.0.0.1:<erlang_port>.
 start_sk_docker() ->
     Cmd = lists:flatten(
-              io_lib:format("docker run -d --rm -p 1234 ~s:~s", [?DOCKER_IMAGE, ?DOCKER_TAG])),
+              io_lib:format("docker run -d --rm --network=host ~s:~s",
+                            [?DOCKER_IMAGE, ?DOCKER_TAG])),
     Id0 = string:trim(
               os:cmd(Cmd)),
     case is_docker_sha(Id0) of
         true ->
             Id = hd(string:tokens(Id0, "\n")),
-            IP = docker_ip(Id),
-            Port = docker_mapped_port(Id, 1234),
+            %% With --network=host, the container shares the host's
+            %% network.  Use 127.0.0.1 for both directions.
+            IP = {127, 0, 0, 1},
+            Port = 1234,
             {ok,
              #{id => Id,
                ip => IP,
@@ -542,37 +565,6 @@ docker_run_cmd(Image, Cmd) ->
             io_lib:format("docker run --rm ~s /bin/sh -c '~s'", [Image, Cmd])),
     Output = os:cmd(FullCmd),
     {ok, Output}.
-
-%% @doc Get the IP address of a running Docker container.
-docker_ip(Id) ->
-    Cmd = "docker inspect --format='{{range .NetworkSettings.Networks}}{{.IPAdd"
-          "ress}}{{end}}' "
-          ++ Id,
-    IPStr =
-        string:trim(
-            os:cmd(Cmd)),
-    case inet:parse_address(IPStr) of
-        {ok, IP} ->
-            IP;
-        {error, _} ->
-            %% Fallback: try localhost with mapped port
-            {127, 0, 0, 1}
-    end.
-
-%% @doc Get the host-mapped port for a container's internal port.
-docker_mapped_port(Id, InternalPort) ->
-    Cmd = lists:flatten(
-              io_lib:format("docker port ~s ~p/tcp", [Id, InternalPort])),
-    Output =
-        string:trim(
-            os:cmd(Cmd)),
-    %% Output is like "0.0.0.0:32768" or "[::]:32768"
-    case string:split(Output, ":", trailing) of
-        [_, PortStr] ->
-            list_to_integer(string:trim(PortStr));
-        _ ->
-            InternalPort
-    end.
 
 %% @doc Check if a string looks like a Docker container SHA.
 is_docker_sha(L) ->
@@ -607,7 +599,8 @@ wait_for_sshd(IP, Port, Retries) ->
 %% Internal: Key Generation and Server Setup
 %%====================================================================
 
-%% @doc Generate an SK key pair inside the Docker container using sk-dummy.so.
+%% @doc Generate an SK key pair inside the Docker container using
+%% sk-dummy.so.
 %% Returns {PrivateKeyPathInDocker, PublicKeyBinary}.
 generate_sk_key_in_docker(Config, KeyType) ->
     KeyBase =
@@ -619,11 +612,12 @@ generate_sk_key_in_docker(Config, KeyType) ->
         end,
     generate_sk_key_in_docker(Config, KeyType, KeyBase).
 
-generate_sk_key_in_docker( Config , KeyType , KeyBase ) -> DockerID = proplists : get_value( docker_id , Config ) , KeygenCmd = lists : flatten( io_lib : format( "docker exec ~s /bin/sh -c '" "SSH_SK_PROVIDER=" ?SK_DUMMY_PATH " /buildroot/ssh/bin/ssh-keygen" " -t ~s -f ~s -N \"\" -q 2>/dev/null;" " cat ~s.pub'" , [ DockerID , KeyType , KeyBase , KeyBase ] ) ) , PubKeyStr = string : trim( os : cmd( KeygenCmd ) ) , ct : log( "Generated SK key (~s) at ~s, pub:~n~s" , [ KeyType , KeyBase , PubKeyStr ] ) , case PubKeyStr of "" -> ct : fail( "Failed to generate ~s key in Docker" , [ KeyType ] ) ; _ -> { KeyBase , list_to_binary( PubKeyStr ++ "\n" ) } end .
+generate_sk_key_in_docker( Config , KeyType , KeyBase ) -> DockerID = proplists : get_value( docker_id , Config ) , KeygenCmd = lists : flatten( io_lib : format( "docker exec ~s /bin/sh -c '" "rm -f ~s ~s.pub; " "SSH_SK_PROVIDER=" ?SK_DUMMY_PATH " /buildroot/ssh/bin/ssh-keygen" " -t ~s -f ~s -N \"\" -q 2>/dev/null;" " cat ~s.pub'" , [ DockerID , KeyBase , KeyBase , KeyType , KeyBase , KeyBase ] ) ) , PubKeyStr = string : trim( os : cmd( KeygenCmd ) ) , ct : log( "Generated SK key (~s) at ~s, pub:~n~s" , [ KeyType , KeyBase , PubKeyStr ] ) , case PubKeyStr of "" -> ct : fail( "Failed to generate ~s key in Docker" , [ KeyType ] ) ; _ -> { KeyBase , list_to_binary( PubKeyStr ++ "\n" ) } end .
 
     %% Generate the key using docker exec (not ssh)
 
-%% @doc Set up an Erlang SSH daemon configured to accept SK public key auth.
+%% @doc Set up an Erlang SSH daemon configured to accept SK public key
+%% auth.
 setup_otp_server_for_sk(Config, PubKeyBin) ->
     setup_otp_server_for_sk(Config, PubKeyBin, []).
 
@@ -631,13 +625,16 @@ setup_otp_server_for_sk(Config, PubKeyBin, ExtraOpts) ->
     PrivDir = proplists:get_value(priv_dir, Config),
     SysDir = new_dir(PrivDir, "sys"),
     UsrDir = new_dir(PrivDir, "usr"),
-    ok = ssh_test_lib:setup_all_host_keys(SysDir),
+    %% Generate fresh host keys directly with ssh-keygen rather than
+    %% using ssh_test_lib:setup_all_host_keys/1 which expects a
+    %% data_dir with pre-existing key source files.
+    generate_host_keys(SysDir),
     %% Write the SK public key to authorized_keys
     AuthKeysFile = filename:join(UsrDir, "authorized_keys"),
     ok = file:write_file(AuthKeysFile, PubKeyBin),
     DaemonOpts =
         [{auth_methods, "publickey"},
-         {preferred_algorithms, ssh_transport:supported_algorithms()},
+         {preferred_algorithms, safe_algorithms()},
          {system_dir, SysDir},
          {user_dir, UsrDir},
          {failfun, fun ssh_test_lib:failfun/2}
@@ -645,15 +642,52 @@ setup_otp_server_for_sk(Config, PubKeyBin, ExtraOpts) ->
     {Server, Host, HostPort} = ssh_test_lib:daemon(0, DaemonOpts),
     {Server, Host, HostPort, SysDir, UsrDir}.
 
+%% @doc Return a "safe" algorithm list that works with both our modified
+%% ssh_transport (which adds SK public key types) and the system's
+%% ssh_connection_handler (which may not support newer kex algorithms
+%% like mlkem768x25519-sha256 that our ssh_transport advertises).
+%%
+%% We take the system's default algorithms and inject the SK public key
+%% types into the public_key list.
+safe_algorithms() ->
+    %% Get the system default algorithms (these are known to work with
+    %% the system's ssh_connection_handler).
+    SysAlgs = ssh:default_algorithms(),
+    %% Add SK types to the public_key list if not already present.
+    SKTypes = ['sk-ssh-ed25519@openssh.com', 'sk-ecdsa-sha2-nistp256@openssh.com'],
+    PubKeyAlgs = proplists:get_value(public_key, SysAlgs, []),
+    NewPubKey = SKTypes ++ [A || A <- PubKeyAlgs, not lists:member(A, SKTypes)],
+    lists:keyreplace(public_key, 1, SysAlgs, {public_key, NewPubKey}).
+
+%% @doc Generate SSH host keys in the given directory using ssh-keygen.
+generate_host_keys(SysDir) ->
+    lists:foreach(fun({Alg, File}) ->
+                     KeyFile = filename:join(SysDir, File),
+                     Cmd = lists:flatten(
+                               io_lib:format("ssh-keygen -t ~s -f ~s -N '' -q", [Alg, KeyFile])),
+                     case os:cmd(Cmd ++ " 2>&1") of
+                         "" -> ok;
+                         _Output -> ok  %% ssh-keygen may print warnings, that's fine
+                     end
+                  end,
+                  [{"rsa", "ssh_host_rsa_key"},
+                   {"ecdsa", "ssh_host_ecdsa_key"},
+                   {"ed25519", "ssh_host_ed25519_key"}]),
+    %% Verify at least one host key was generated
+    true =
+        filelib:is_regular(
+            filename:join(SysDir, "ssh_host_rsa_key")),
+    ok.
+
 %%====================================================================
 %% Internal: Exec in Docker
 %%====================================================================
 
-%% @doc Execute a command inside the running Docker container via `docker exec`.
+%% @doc Execute a command inside the running Docker container via
+%% `docker exec'.
 %% Returns {ok, {ExitStatus, OutputBinary}} | {error, timeout}.
 exec_in_docker(Config, Cmd) ->
     DockerID = proplists:get_value(docker_id, Config),
-    %% Use docker exec to run the command inside the container
     FullCmd =
         lists:flatten(
             io_lib:format("docker exec ~s /bin/sh -c '~s'", [DockerID, escape_single_quotes(Cmd)])),
@@ -687,10 +721,23 @@ collect_port_output(Port, Acc) ->
         {Port, {data, {noeol, Line}}} ->
             collect_port_output(Port, <<Acc/binary, Line/binary>>);
         {Port, {exit_status, Status}} ->
-            {Status, Acc}
+            %% Data messages may still be queued after exit_status;
+            %% drain any remaining output before returning.
+            drain_port_output(Port, Status, Acc)
     after 30000 ->
         catch erlang:port_close(Port),
         {1, Acc}
+    end.
+
+%% @doc Drain any remaining data from the port after exit_status was received.
+drain_port_output(Port, Status, Acc) ->
+    receive
+        {Port, {data, {eol, Line}}} ->
+            drain_port_output(Port, Status, <<Acc/binary, Line/binary, "\n">>);
+        {Port, {data, {noeol, Line}}} ->
+            drain_port_output(Port, Status, <<Acc/binary, Line/binary>>)
+    after 500 ->
+        {Status, Acc}
     end.
 
 %%====================================================================
@@ -704,14 +751,13 @@ new_dir(BaseDir, Name) ->
     ok = file:make_dir(Dir),
     Dir.
 
-%% @doc Format a host tuple or string for ssh command line.
-format_host({0, 0, 0, 0}) ->
-    {ok, Name} = inet:gethostname(),
-    Name;
-format_host(IP) when is_tuple(IP) ->
-    inet:ntoa(IP);
-format_host(Host) when is_list(Host) ->
-    Host.
+%% @doc Get the IP address that the Docker container should use to reach
+%% the host machine (where the Erlang SSH daemon is listening).
+%%
+%% Since we run the container with --network=host, the container shares
+%% the host's network namespace.  127.0.0.1 works for both directions.
+host_ip_for_docker(_Host) ->
+    "127.0.0.1".
 
 %% @doc Escape single quotes in a shell command.
 escape_single_quotes(Str) ->

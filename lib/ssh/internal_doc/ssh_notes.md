@@ -180,6 +180,7 @@ ssh_protocol_SUITE (contains a minimal ssh that injects errors and hard-to-test 
 ssh_comp_SUITE
 ## Compatibility
 ssh_comp_SUITE (Tests towards dockers with different OpenSSH versions)
+ssh_sk_compat_SUITE (FIDO/U2F security key integration tests via Docker with sk-dummy.so)
 ## Channels
 ssh_chan_behaviours_SUITE
 ssh_basic_SUITE (shell, cli, key callback mechanism)

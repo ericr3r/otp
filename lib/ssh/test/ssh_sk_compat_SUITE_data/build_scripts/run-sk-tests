@@ -1,0 +1,477 @@
+#!/usr/bin/env bash
+# %CopyrightBegin%
+#
+# SPDX-License-Identifier: Apache-2.0
+#
+# Copyright Ericsson AB 2025. All Rights Reserved.
+#
+# Licensed under the Apache License, Version 2.0 (the "License");
+# you may not use this file except in compliance with the License.
+# You may obtain a copy of the License at
+#
+#     http://www.apache.org/licenses/LICENSE-2.0
+#
+# Unless required by applicable law or agreed to in writing, software
+# distributed under the License is distributed on an "AS IS" BASIS,
+# WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+# See the License for the specific language governing permissions and
+# limitations under the License.
+#
+# %CopyrightEnd%
+
+# Build the FIDO/U2F sk-dummy Docker image and run the SK integration
+# test suite (ssh_sk_compat_SUITE) against it.
+#
+# Usage:
+#   ./run-sk-tests                     # build image + run all tests
+#   ./run-sk-tests --build-only        # just build the Docker image
+#   ./run-sk-tests --test-only         # skip build, run tests only
+#   ./run-sk-tests --test-only GROUP   # run a specific test group
+#   ./run-sk-tests --help
+#
+# Groups: sk_keygen, sk_auth, sk_advanced
+#
+# Prerequisites:
+#   - Docker daemon running
+#   - Erlang/OTP built (erl, erlc, ct_run on PATH or in ../../bin)
+#
+# The script will:
+#   1. Build a Docker image containing OpenSSH with sk-dummy.so
+#   2. Tag it as ssh_sk_compat_suite:latest
+#   3. Run ssh_sk_compat_SUITE via Common Test
+#   4. Print a summary and exit with the CT exit code
+
+set -euo pipefail
+
+SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"
+SUITE_DATA_DIR="$(dirname "$SCRIPT_DIR")"
+TEST_DIR="$(dirname "$SUITE_DATA_DIR")"
+SSH_DIR="$(dirname "$TEST_DIR")"
+OTP_ROOT="$(cd "$SSH_DIR/../.." && pwd)"
+
+DOCKER_IMAGE="ssh_sk_compat_suite"
+DOCKER_TAG="latest"
+OPENSSH_VER="${OPENSSH_VER:-9.9p1}"
+LOG_DIR="${LOG_DIR:-/tmp/ssh_sk_compat_logs}"
+CT_GROUP=""
+BUILD=true
+TEST=true
+
+usage() {
+    cat <<EOF
+Usage: $(basename "$0") [OPTIONS] [GROUP]
+
+Build the sk-dummy Docker image and run FIDO/U2F integration tests.
+
+Options:
+  --build-only     Build the Docker image only, do not run tests
+  --test-only      Run tests only, assume image already exists
+  --openssh VER    OpenSSH version to build (default: $OPENSSH_VER)
+  --logdir DIR     Common Test log directory (default: $LOG_DIR)
+  --help           Show this help
+
+Groups (optional, for --test-only):
+  sk_keygen        Key generation tests only
+  sk_auth          Authentication tests only
+  sk_advanced      Advanced tests (exec, sftp, counter, flags)
+
+Environment variables:
+  OPENSSH_VER      OpenSSH version (default: $OPENSSH_VER)
+  LOG_DIR          CT log directory (default: $LOG_DIR)
+
+Examples:
+  ./run-sk-tests                          # full build + test
+  ./run-sk-tests --test-only sk_auth      # just auth tests
+  OPENSSH_VER=9.6p1 ./run-sk-tests       # use specific OpenSSH
+EOF
+    exit 0
+}
+
+# ---------------------------------------------------------------------------
+# Argument parsing
+# ---------------------------------------------------------------------------
+while [[ $# -gt 0 ]]; do
+    case "$1" in
+        --build-only)
+            TEST=false
+            shift
+            ;;
+        --test-only)
+            BUILD=false
+            shift
+            ;;
+        --openssh)
+            OPENSSH_VER="$2"
+            shift 2
+            ;;
+        --logdir)
+            LOG_DIR="$2"
+            shift 2
+            ;;
+        --help|-h)
+            usage
+            ;;
+        -*)
+            echo "Unknown option: $1" >&2
+            echo "Try --help for usage." >&2
+            exit 1
+            ;;
+        *)
+            CT_GROUP="$1"
+            shift
+            ;;
+    esac
+done
+
+# ---------------------------------------------------------------------------
+# Pre-flight checks
+# ---------------------------------------------------------------------------
+preflight() {
+    local ok=true
+
+    if ! command -v docker >/dev/null 2>&1; then
+        echo "ERROR: docker not found on PATH" >&2
+        ok=false
+    fi
+
+    if ! docker info >/dev/null 2>&1; then
+        echo "ERROR: Docker daemon is not running" >&2
+        echo "  Start it with: sudo systemctl start docker" >&2
+        echo "  Or:            sudo dockerd &" >&2
+        ok=false
+    fi
+
+    if $TEST; then
+        if ! command -v erl >/dev/null 2>&1; then
+            echo "ERROR: erl not found on PATH" >&2
+            echo "  Build OTP first or add it to PATH" >&2
+            ok=false
+        fi
+    fi
+
+    if ! $ok; then
+        exit 1
+    fi
+}
+
+# ---------------------------------------------------------------------------
+# Build Docker image
+# ---------------------------------------------------------------------------
+build_image() {
+    echo "============================================================"
+    echo "  Building Docker image: ${DOCKER_IMAGE}:${DOCKER_TAG}"
+    echo "  OpenSSH version: ${OPENSSH_VER}"
+    echo "============================================================"
+    echo ""
+
+    local dockerfile="${SCRIPT_DIR}/Dockerfile"
+
+    if [[ ! -f "$dockerfile" ]]; then
+        echo "ERROR: Dockerfile not found at $dockerfile" >&2
+        echo "  Expected: lib/ssh/test/ssh_sk_compat_SUITE_data/build_scripts/Dockerfile" >&2
+        exit 1
+    fi
+
+    # Download OpenSSH tarball if not cached
+    local tarball="openssh-${OPENSSH_VER}.tar.gz"
+    local tarball_path="${SCRIPT_DIR}/${tarball}"
+    local openssh_url="https://ftp.eu.openbsd.org/pub/OpenBSD/OpenSSH/portable/${tarball}"
+
+    if [[ ! -f "$tarball_path" ]]; then
+        echo "Downloading OpenSSH ${OPENSSH_VER}..."
+        if command -v wget >/dev/null 2>&1; then
+            wget -q --show-progress -O "$tarball_path" "$openssh_url"
+        elif command -v curl >/dev/null 2>&1; then
+            curl -fSL -o "$tarball_path" "$openssh_url"
+        else
+            echo "ERROR: Neither wget nor curl found" >&2
+            exit 1
+        fi
+        echo "Downloaded: $tarball_path"
+    else
+        echo "Using cached tarball: $tarball_path"
+    fi
+
+    # Generate a build-time Dockerfile that copies the local tarball
+    local tmpfile
+    tmpfile=$(mktemp "${SCRIPT_DIR}/Dockerfile.sk.XXXXXX")
+    trap "rm -f '$tmpfile'" EXIT
+
+    cat > "$tmpfile" <<DOCKER_EOF
+ARG UBUNTU_VERSION=22.04
+FROM ubuntu:\${UBUNTU_VERSION}
+
+ARG OPENSSH_VER
+ARG DEBIAN_FRONTEND=noninteractive
+
+LABEL description="OpenSSH with sk-dummy.so for FIDO/U2F integration testing"
+LABEL openssh-version=\${OPENSSH_VER}
+
+# Install build dependencies
+RUN apt-get update && apt-get install -y --no-install-recommends \\
+        build-essential \\
+        zlib1g-dev \\
+        libssl-dev \\
+        libpam0g-dev \\
+        sshpass \\
+        sudo \\
+        iputils-ping \\
+        net-tools \\
+    && rm -rf /var/lib/apt/lists/*
+
+# Create test user
+RUN useradd -m -s /bin/bash -G sudo sshtester \\
+    && echo 'sshtester:foobar' | chpasswd \\
+    && echo 'sshtester ALL=(ALL) NOPASSWD:ALL' >> /etc/sudoers
+
+# Prepare sshd privilege separation
+RUN mkdir -p /var/empty \\
+    && chmod 755 /var/empty \\
+    && (getent group sshd > /dev/null || groupadd -r sshd) \\
+    && (getent passwd sshd > /dev/null || useradd -r -g sshd -d /var/empty -s /bin/false sshd)
+
+WORKDIR /buildroot
+
+# Copy and extract OpenSSH source
+COPY ${tarball} .
+RUN tar xf ${tarball}
+
+# Build OpenSSH — SK key types are supported by default in OpenSSH >= 8.2.
+# We do NOT use --with-security-key-builtin (requires a working libfido2
+# shared library at configure time).  Instead we build sk-dummy.so as an
+# external middleware loaded at runtime via SSH_SK_PROVIDER.
+WORKDIR /buildroot/openssh-\${OPENSSH_VER}
+RUN ./configure \\
+        --prefix=/buildroot/ssh \\
+        --with-pam \\
+    && make -j"\$(nproc)" \\
+    && make install
+
+# Build sk-dummy.so using the top-level OpenSSH Makefile.
+# The Makefile's SK_DUMMY_LIBRARY target handles all the complexity:
+# recompiling ed25519.c/hash.c with -fPIC, linking openbsd-compat,
+# and resolving all internal symbols (crypto_sign_ed25519,
+# arc4random_buf, etc.).  This is far more reliable than trying to
+# replicate the build by hand.
+RUN make regress/misc/sk-dummy/sk-dummy.so \\
+    && mkdir -p /buildroot/ssh/lib \\
+    && cp regress/misc/sk-dummy/sk-dummy.so /buildroot/ssh/lib/sk-dummy.so
+
+# Verify sk-dummy.so was built and all symbols resolve
+RUN ls -la /buildroot/ssh/lib/sk-dummy.so \\
+    && ldd /buildroot/ssh/lib/sk-dummy.so \\
+    && echo "sk-dummy.so built successfully"
+
+# Generate host keys
+RUN mkdir -p /buildroot/ssh/etc \\
+    && /buildroot/ssh/bin/ssh-keygen -A
+
+# Configure sshd for FIDO testing
+RUN cat >> /buildroot/ssh/etc/sshd_config <<'SSHD_EOF'
+PasswordAuthentication yes
+PubkeyAuthentication yes
+UsePAM yes
+PubkeyAcceptedAlgorithms +sk-ecdsa-sha2-nistp256@openssh.com,sk-ssh-ed25519@openssh.com
+AllowUsers sshtester
+LogLevel DEBUG
+UseDNS no
+SSHD_EOF
+
+# Generate FIDO test keys using sk-dummy.so
+RUN mkdir -p /home/sshtester/.ssh \\
+    && chmod 700 /home/sshtester/.ssh \\
+    && SSH_SK_PROVIDER=/buildroot/ssh/lib/sk-dummy.so \\
+       /buildroot/ssh/bin/ssh-keygen -t ecdsa-sk \\
+           -f /home/sshtester/.ssh/id_ecdsa_sk \\
+           -N "" -C "ECDSA-SK test key (sk-dummy)" \\
+    && SSH_SK_PROVIDER=/buildroot/ssh/lib/sk-dummy.so \\
+       /buildroot/ssh/bin/ssh-keygen -t ed25519-sk \\
+           -f /home/sshtester/.ssh/id_ed25519_sk \\
+           -N "" -C "Ed25519-SK test key (sk-dummy)" \\
+    && touch /home/sshtester/.ssh/authorized_keys \\
+    && chmod 600 /home/sshtester/.ssh/authorized_keys \\
+    && chown -R sshtester:sshtester /home/sshtester/.ssh
+
+# Export test keys to well-known location
+RUN mkdir -p /buildroot/test_keys \\
+    && cp /home/sshtester/.ssh/id_ecdsa_sk.pub /buildroot/test_keys/ \\
+    && cp /home/sshtester/.ssh/id_ed25519_sk.pub /buildroot/test_keys/ \\
+    && cp /home/sshtester/.ssh/id_ecdsa_sk /buildroot/test_keys/ \\
+    && cp /home/sshtester/.ssh/id_ed25519_sk /buildroot/test_keys/
+
+# Print build info
+RUN /buildroot/ssh/bin/ssh -V 2>&1 || true \\
+    && echo "=== ECDSA-SK public key ===" \\
+    && cat /home/sshtester/.ssh/id_ecdsa_sk.pub \\
+    && echo "=== Ed25519-SK public key ===" \\
+    && cat /home/sshtester/.ssh/id_ed25519_sk.pub
+
+EXPOSE 1234
+CMD ["/buildroot/ssh/sbin/sshd", "-D", "-p", "1234", "-e"]
+DOCKER_EOF
+
+    # Build the Docker image
+    echo ""
+    echo "Building Docker image (this may take several minutes)..."
+    echo ""
+
+    cd "$SCRIPT_DIR"
+    docker build \
+        --build-arg "OPENSSH_VER=${OPENSSH_VER}" \
+        -t "${DOCKER_IMAGE}:${DOCKER_TAG}" \
+        -t "${DOCKER_IMAGE}:openssh${OPENSSH_VER}" \
+        -f "$tmpfile" \
+        .
+
+    rm -f "$tmpfile"
+    trap - EXIT
+
+    echo ""
+    echo "============================================================"
+    echo "  Docker image built successfully"
+    echo "  Image: ${DOCKER_IMAGE}:${DOCKER_TAG}"
+    echo "============================================================"
+    echo ""
+
+    # Quick sanity check
+    echo "Sanity check: verifying sk-dummy.so is present..."
+    local check_output
+    check_output=$(docker run --rm "${DOCKER_IMAGE}:${DOCKER_TAG}" \
+        /bin/sh -c 'test -f /buildroot/ssh/lib/sk-dummy.so && echo SK_OK || echo SK_MISSING')
+    if echo "$check_output" | grep -q "SK_OK"; then
+        echo "  sk-dummy.so: OK"
+    else
+        echo "  ERROR: sk-dummy.so not found in image!" >&2
+        exit 1
+    fi
+
+    echo "Sanity check: verifying pre-generated SK keys..."
+    check_output=$(docker run --rm "${DOCKER_IMAGE}:${DOCKER_TAG}" \
+        /bin/sh -c 'test -f /home/sshtester/.ssh/id_ecdsa_sk.pub && \
+                     test -f /home/sshtester/.ssh/id_ed25519_sk.pub && \
+                     echo KEYS_OK || echo KEYS_MISSING')
+    if echo "$check_output" | grep -q "KEYS_OK"; then
+        echo "  Pre-generated SK keys: OK"
+    else
+        echo "  WARNING: Pre-generated SK keys not found" >&2
+    fi
+    echo ""
+}
+
+# ---------------------------------------------------------------------------
+# Run tests
+# ---------------------------------------------------------------------------
+run_tests() {
+    echo "============================================================"
+    echo "  Running ssh_sk_compat_SUITE"
+    if [[ -n "$CT_GROUP" ]]; then
+        echo "  Group: ${CT_GROUP}"
+    fi
+    echo "  Log dir: ${LOG_DIR}"
+    echo "============================================================"
+    echo ""
+
+    # Verify image exists
+    if ! docker images -q "${DOCKER_IMAGE}:${DOCKER_TAG}" 2>/dev/null | grep -q .; then
+        echo "ERROR: Docker image ${DOCKER_IMAGE}:${DOCKER_TAG} not found" >&2
+        echo "  Run with --build-only first, or without --test-only" >&2
+        exit 1
+    fi
+
+    mkdir -p "$LOG_DIR"
+
+    # Determine how to invoke CT.  Prefer ct_run if available, otherwise
+    # fall back to erl -run ct.
+    local ct_args=()
+    ct_args+=(-suite "${TEST_DIR}/ssh_sk_compat_SUITE")
+    ct_args+=(-logdir "$LOG_DIR")
+    ct_args+=(-include "${SSH_DIR}/include")
+    ct_args+=(-include "${SSH_DIR}/src")
+    ct_args+=(-include "${OTP_ROOT}/lib/common_test/include")
+    ct_args+=(-include "${OTP_ROOT}/lib/kernel/include")
+    ct_args+=(-include "${OTP_ROOT}/lib/public_key/include")
+
+    if [[ -n "$CT_GROUP" ]]; then
+        ct_args+=(-group "$CT_GROUP")
+    fi
+
+    local exit_code=0
+
+    if command -v ct_run >/dev/null 2>&1; then
+        echo "Using ct_run..."
+        ct_run "${ct_args[@]}" || exit_code=$?
+    else
+        echo "ct_run not found, using erl -run ct run_test..."
+        # Build the argument list as an Erlang term
+        local suite_path="${TEST_DIR}/ssh_sk_compat_SUITE"
+        local erl_args="-suite ${suite_path} -logdir ${LOG_DIR}"
+        if [[ -n "$CT_GROUP" ]]; then
+            erl_args="${erl_args} -group ${CT_GROUP}"
+        fi
+
+        erl -noshell \
+            -pa "${SSH_DIR}/ebin" \
+            -pa "${SSH_DIR}/test" \
+            -pa "${OTP_ROOT}/lib/common_test/ebin" \
+            -pa "${OTP_ROOT}/lib/kernel/ebin" \
+            -pa "${OTP_ROOT}/lib/stdlib/ebin" \
+            -pa "${OTP_ROOT}/lib/public_key/ebin" \
+            -pa "${OTP_ROOT}/lib/crypto/ebin" \
+            -pa "${OTP_ROOT}/lib/ssh/ebin" \
+            -eval "ct:run_test([{suite,\"${suite_path}\"},{logdir,\"${LOG_DIR}\"}$(
+                [[ -n "$CT_GROUP" ]] && echo ",{group,${CT_GROUP}}"
+            )])." \
+            -s init stop \
+            || exit_code=$?
+    fi
+
+    echo ""
+    echo "============================================================"
+    if [[ $exit_code -eq 0 ]]; then
+        echo "  Tests PASSED"
+    else
+        echo "  Tests FAILED (exit code: ${exit_code})"
+    fi
+    echo "  Logs: ${LOG_DIR}"
+    echo "============================================================"
+
+    return $exit_code
+}
+
+# ---------------------------------------------------------------------------
+# Cleanup helper (not called automatically, available for manual use)
+# ---------------------------------------------------------------------------
+cleanup() {
+    echo "Cleaning up Docker resources..."
+
+    # Stop any running containers from our image
+    local containers
+    containers=$(docker ps -q --filter "ancestor=${DOCKER_IMAGE}:${DOCKER_TAG}" 2>/dev/null || true)
+    if [[ -n "$containers" ]]; then
+        echo "  Stopping containers: $containers"
+        docker kill $containers 2>/dev/null || true
+    fi
+
+    # Remove the image
+    echo "  Removing image ${DOCKER_IMAGE}:${DOCKER_TAG}"
+    docker rmi "${DOCKER_IMAGE}:${DOCKER_TAG}" 2>/dev/null || true
+
+    echo "  Done."
+}
+
+# ---------------------------------------------------------------------------
+# Main
+# ---------------------------------------------------------------------------
+main() {
+    preflight
+
+    if $BUILD; then
+        build_image
+    fi
+
+    if $TEST; then
+        run_tests
+    fi
+}
+
+main "$@"

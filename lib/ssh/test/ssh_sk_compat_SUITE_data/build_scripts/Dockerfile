@@ -37,118 +37,81 @@
 # See OpenSSH PROTOCOL.u2f and regress/misc/sk-dummy/sk-dummy.c for
 # details on the dummy middleware implementation.
 
-ARG BASE_IMAGE=ubuntu:22.04
+FROM ubuntu:22.04
 
-FROM ${BASE_IMAGE} AS builder
-
-ARG OPENSSH_VERSION=9.6p1
-ARG OPENSSL_VERSION=3.2.1
+ARG OPENSSH_VERSION=9.9p1
 
 ENV DEBIAN_FRONTEND=noninteractive
 
-# Install build dependencies
+# Install build dependencies.
+# Note: we do NOT install libfido2-dev here.  sk-dummy.so only needs
+# libcrypto (from libssl-dev) and the OpenSSH sk-api.h header.
 RUN apt-get update && apt-get install -y --no-install-recommends \
         build-essential \
         zlib1g-dev \
+        libssl-dev \
         libpam0g-dev \
         wget \
         ca-certificates \
         pkg-config \
-        autoconf \
-        automake \
-        libtool \
     && rm -rf /var/lib/apt/lists/*
 
 WORKDIR /buildroot
 
-# ---------- Build OpenSSL ----------
-RUN wget -q "https://www.openssl.org/source/openssl-${OPENSSL_VERSION}.tar.gz" \
-        -O openssl.tar.gz \
-    && tar xf openssl.tar.gz \
-    && cd "openssl-${OPENSSL_VERSION}" \
-    && ./config --prefix=/buildroot/ssl \
-                --openssldir=/buildroot/ssl \
-                shared \
-                no-tests \
-    && make -j"$(nproc)" \
-    && make install_sw \
-    && cd /buildroot \
-    && rm -rf "openssl-${OPENSSL_VERSION}" openssl.tar.gz
-
 # ---------- Build OpenSSH ----------
+# SK key types (sk-ecdsa-sha2-nistp256, sk-ssh-ed25519) are supported by
+# default in OpenSSH >= 8.2.  We do NOT use --with-security-key-builtin
+# because that requires a working libfido2 shared library at configure
+# time.  Instead we build sk-dummy.so as an external middleware that is
+# loaded at runtime via the SSH_SK_PROVIDER environment variable.
 RUN wget -q "https://ftp.eu.openbsd.org/pub/OpenBSD/OpenSSH/portable/openssh-${OPENSSH_VERSION}.tar.gz" \
         -O openssh.tar.gz \
     && tar xf openssh.tar.gz \
     && cd "openssh-${OPENSSH_VERSION}" \
     && ./configure \
             --prefix=/buildroot/ssh \
-            --with-ssl-dir=/buildroot/ssl \
             --with-pam \
             --without-pie \
-            --with-security-key-builtin \
-            LDFLAGS="-Wl,-R/buildroot/ssl/lib" \
     && make -j"$(nproc)" \
     && make install \
-    && echo "Built OpenSSH ${OPENSSH_VERSION} with OpenSSL ${OPENSSL_VERSION}"
+    && echo "Built OpenSSH ${OPENSSH_VERSION}"
 
 # ---------- Build sk-dummy.so ----------
-# The sk-dummy middleware is in the regress/misc/sk-dummy/ directory of
-# the OpenSSH source tree. It implements the sk-api.h interface using
-# software crypto only (no hardware authenticator required).
+# Use the top-level OpenSSH Makefile's SK_DUMMY_LIBRARY target.  It
+# handles all the complexity: recompiling ed25519.c/hash.c with -fPIC,
+# linking the openbsd-compat library, and resolving all internal symbols
+# (crypto_sign_ed25519, arc4random_buf, etc.).  This is far more
+# reliable than trying to replicate the build by hand.
 RUN cd "openssh-${OPENSSH_VERSION}" \
-    && if [ -d regress/misc/sk-dummy ]; then \
-           cd regress/misc/sk-dummy \
-           && if [ -f Makefile ]; then \
-                  make clean 2>/dev/null; true; \
-              fi \
-           && cc -shared -fPIC -Wall \
-                  -I../../.. \
-                  -I/buildroot/ssl/include \
-                  -o sk-dummy.so \
-                  sk-dummy.c \
-                  -L/buildroot/ssl/lib \
-                  -Wl,-R/buildroot/ssl/lib \
-                  -lcrypto \
-           && cp sk-dummy.so /buildroot/ssh/lib/sk-dummy.so \
-           && echo "Built sk-dummy.so successfully"; \
-       else \
-           echo "ERROR: sk-dummy source not found" && exit 1; \
-       fi
+    && make regress/misc/sk-dummy/sk-dummy.so \
+    && mkdir -p /buildroot/ssh/lib \
+    && cp regress/misc/sk-dummy/sk-dummy.so /buildroot/ssh/lib/sk-dummy.so \
+    && echo "Built sk-dummy.so successfully"
+
+# Verify sk-dummy.so was built and all symbols resolve
+RUN ls -la /buildroot/ssh/lib/sk-dummy.so \
+    && ldd /buildroot/ssh/lib/sk-dummy.so \
+    && echo "sk-dummy.so dependencies OK"
 
 # Clean up source trees to reduce image size
 RUN rm -rf /buildroot/openssh-* /buildroot/openssh.tar.gz
 
-# ---------- Runtime image ----------
-FROM ${BASE_IMAGE}
-
-ENV DEBIAN_FRONTEND=noninteractive
-
-RUN apt-get update && apt-get install -y --no-install-recommends \
-        zlib1g \
-        libpam0g \
-        sshpass \
-        iputils-ping \
-        net-tools \
-        passwd \
-    && rm -rf /var/lib/apt/lists/*
-
-# Copy built artifacts from builder stage
-COPY --from=builder /buildroot/ssl /buildroot/ssl
-COPY --from=builder /buildroot/ssh /buildroot/ssh
-
-# Configure the runtime linker to find our custom OpenSSL
-RUN echo "/buildroot/ssl/lib" > /etc/ld.so.conf.d/buildroot-ssl.conf \
-    && ldconfig
-
 # Create privilege separation directory and user for sshd
 RUN mkdir -p /var/empty \
     && chmod 755 /var/empty \
-    && groupadd -r sshd 2>/dev/null || true \
-    && useradd -r -g sshd -d /var/empty -s /bin/false sshd 2>/dev/null || true
+    && (getent group sshd > /dev/null || groupadd -r sshd) \
+    && (getent passwd sshd > /dev/null || useradd -r -g sshd -d /var/empty -s /bin/false sshd)
 
-# Create a test user with a known password for password-based auth
+# Create test user with a known password for password-based auth
 RUN useradd -m -s /bin/bash sshtester \
     && echo 'sshtester:foobar' | chpasswd
+
+# Install runtime packages needed for testing
+RUN apt-get update && apt-get install -y --no-install-recommends \
+        sshpass \
+        iputils-ping \
+        net-tools \
+    && rm -rf /var/lib/apt/lists/*
 
 # Configure sshd: enable PAM + pubkey + SK algorithms
 RUN cat >> /buildroot/ssh/etc/sshd_config <<'SSHD_CONF'
@@ -156,13 +119,17 @@ UsePAM yes
 PasswordAuthentication yes
 PubkeyAuthentication yes
 PubkeyAcceptedAlgorithms +sk-ecdsa-sha2-nistp256@openssh.com,sk-ssh-ed25519@openssh.com
+AllowUsers sshtester
 AuthorizedKeysFile .ssh/authorized_keys
-LogLevel DEBUG2
+LogLevel DEBUG
+UseDNS no
 SSHD_CONF
 
-# Generate host keys (including SK types are not needed for host keys,
-# standard host keys suffice since SK is for user authentication)
-RUN /buildroot/ssh/bin/ssh-keygen -A
+# Generate host keys — standard host keys suffice since SK is for user
+# authentication only; host keys use standard algorithms.
+# Note: ssh-keygen -A without -f uses the --prefix path from configure.
+RUN mkdir -p /buildroot/ssh/etc \
+    && /buildroot/ssh/bin/ssh-keygen -A
 
 # Pre-generate SK test keys using sk-dummy.so.
 # These will be available inside the container for test use.
@@ -197,5 +164,6 @@ RUN /buildroot/ssh/bin/ssh -V \
 
 EXPOSE 1234
 
-# Run sshd in foreground on port 1234 (matching ssh_compat_SUITE convention)
+# Run sshd in foreground on port 1234 (matching ssh_compat_SUITE convention).
+# -e sends log output to stderr for easy debugging with docker logs.
 CMD ["/buildroot/ssh/sbin/sshd", "-D", "-p", "1234", "-e"]
