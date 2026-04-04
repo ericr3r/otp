@@ -67,31 +67,6 @@ docker build \
     .
 ```
 
-## Verifying the Image
-
-```sh
-# Start the container
-docker run -d --rm -p 2222:1234 --name sk-test ssh_sk_compat_suite:latest
-
-# Verify sk-dummy.so is present
-docker exec sk-test ls -la /buildroot/ssh/lib/sk-dummy.so
-
-# Verify pre-generated SK keys exist
-docker exec sk-test ls -la /home/sshtester/.ssh/id_ecdsa_sk.pub
-docker exec sk-test ls -la /home/sshtester/.ssh/id_ed25519_sk.pub
-
-# Generate a new SK key using sk-dummy.so
-docker exec sk-test /bin/sh -c \
-    'SSH_SK_PROVIDER=/buildroot/ssh/lib/sk-dummy.so \
-     /buildroot/ssh/bin/ssh-keygen -t ecdsa-sk -f /tmp/test_key -N ""'
-
-# View the generated public key
-docker exec sk-test cat /tmp/test_key.pub
-
-# Clean up
-docker kill sk-test
-```
-
 ## Running the Integration Tests
 
 The test suite `ssh_sk_compat_SUITE` is designed to be run via Common Test:
@@ -112,12 +87,19 @@ ct:run_test([{suite, "test/ssh_sk_compat_SUITE"},
 The suite will automatically:
 
 1. Check for Docker availability (skips gracefully if unavailable)
-2. Check for the `ssh_sk_compat_suite:latest` image
-3. Start a container per test group
+2. Discover SK images by scanning `docker images` for
+   `ssh_sk_compat_suite-sk:*` tags (falls back to
+   `ssh_sk_compat_suite:latest`)
+3. Start a container per discovered image version
 4. Generate fresh SK keys inside the container using `sk-dummy.so`
 5. Start an Erlang SSH daemon and have the Docker OpenSSH client authenticate to it
 6. Verify authentication succeeds/fails as expected
 7. Clean up containers after each group
+
+No manual verification step is needed — the `check_docker_sk_present`
+test case confirms `sk-dummy.so` is present in the image, and the
+remaining 13 test cases exercise the full end-to-end authentication
+flow for both key types.
 
 ### Test Cases
 

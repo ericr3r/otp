@@ -715,7 +715,7 @@ Script location: `lib/ssh/test/ssh_compat_SUITE_data/build_scripts/create-sk-dum
 
 ---
 
-### Task 8.2: Verify End-to-End Inside Docker
+### Task 8.2: Verify End-to-End Inside Docker — COMPLETE
 
 Manually verify (or script a smoke test) that the Docker image can:
 
@@ -726,11 +726,17 @@ Manually verify (or script a smoke test) that the Docker image can:
   (or vice versa) using the SK key for `publickey` authentication
 - Both `ecdsa-sk` and `ed25519-sk` key types authenticate successfully
 
+**Superseded by Task 8.3:** The manual verification step and the
+`run-sk-tests` convenience script have been removed.  All end-to-end
+verification is now performed automatically by `ssh_sk_compat_SUITE`
+(14 test cases covering both key types, callback enforcement, wrong-key
+rejection, password fallback, exec, SFTP, counter, and flags).
+
 **Done when**
-- At least one round-trip authentication (OpenSSH client in Docker → OTP SSH
-  server on host) succeeds for each SK key type
-- The verification steps are documented so Tier 3 tests (Task 6.3) can
-  reference the image
+- ~~At least one round-trip authentication (OpenSSH client in Docker → OTP SSH
+  server on host) succeeds for each SK key type~~ ✅ automated in Task 8.3
+- ~~The verification steps are documented so Tier 3 tests (Task 6.3) can
+  reference the image~~ ✅ `build_scripts/README.md` updated
 
 ---
 
