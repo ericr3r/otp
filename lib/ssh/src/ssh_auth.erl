@@ -586,6 +586,12 @@ verify_sig(SessionId, User, Service, AlgBin, KeyBlob, SigWLen, #ssh{opts = Opts}
             true ->
                 %% Crypto verification succeeded.
                 %%
+                %% Two independent checks follow.  Both must pass for
+                %% auth to succeed, but the counter callback is ALWAYS
+                %% invoked (when defined) so applications can track
+                %% every cryptographically-valid attempt — even those
+                %% that will be rejected for missing user presence.
+                %%
                 %% 1. Enforce user presence (UP).
                 %%    OpenSSH requires UP for SK signatures by default
                 %%    (PUBKEYAUTH_TOUCH_REQUIRED).  The only way to
@@ -594,33 +600,40 @@ verify_sig(SessionId, User, Service, AlgBin, KeyBlob, SigWLen, #ssh{opts = Opts}
                 %%    There is no programmatic override via callback.
                 UserPresence = Flags band 16#01 =/= 0,
                 NoTouchRequired = lists:member("no-touch-required", KeyOpts),
-                case NoTouchRequired orelse UserPresence of
-                    false ->
-                        false;
-                    true ->
-                        %% 2. Optionally enforce counter monotonicity.
-                        %%    The sk_fido_counter_fun callback lets
-                        %%    applications track the last-seen counter
-                        %%    per key and reject replayed/cloned tokens.
-                        case ?GET_OPT(sk_fido_counter_fun, Opts) of
-                            undefined ->
-                                true;
-                            CounterFun when is_function(CounterFun, 1) ->
-                                CounterInfo =
-                                    #{counter => Counter,
-                                      key => Key,
-                                      user => User,
-                                      algorithm => list_to_existing_atom(Alg)},
-                                case CounterFun(CounterInfo) of
-                                    ok ->
-                                        true;
-                                    {error, _Reason} ->
-                                        false;
-                                    _ ->
-                                        false
-                                end
-                        end
-                end;
+                UpOk = NoTouchRequired orelse UserPresence,
+
+                %% 2. Always invoke counter callback (when defined).
+                %%    The sk_fido_counter_fun callback lets applications
+                %%    track the last-seen counter per key and reject
+                %%    replayed/cloned tokens.  It runs regardless of UP
+                %%    so that every valid signature is recorded — a
+                %%    cloned key producing UP=0 signatures should still
+                %%    be visible to the counter tracker.
+                %%
+                %%    The callback result is evaluated independently:
+                %%    returning 'ok' does NOT override a UP failure.
+                CounterOk =
+                    case ?GET_OPT(sk_fido_counter_fun, Opts) of
+                        undefined ->
+                            true;
+                        CounterFun when is_function(CounterFun, 1) ->
+                            CounterInfo =
+                                #{counter => Counter,
+                                  key => Key,
+                                  user => User,
+                                  algorithm => list_to_existing_atom(Alg)},
+                            case CounterFun(CounterInfo) of
+                                ok ->
+                                    true;
+                                {error, _Reason} ->
+                                    false;
+                                _ ->
+                                    false
+                            end
+                    end,
+
+                %% Both checks must pass — they are independent.
+                UpOk andalso CounterOk;
             false ->
                 false
         end

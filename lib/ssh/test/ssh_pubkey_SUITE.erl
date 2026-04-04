@@ -48,19 +48,20 @@
          sk_auth_verify_ecdsa/1, sk_auth_verify_ed25519/1, sk_auth_wrong_sig_rejected/1,
          sk_auth_fallback/1, sk_fido_callback_receives_info/1, sk_fido_counter_monotonicity/1,
          sk_fido_default_no_callback/1, sk_fido_callback_bad_return/1,
-         sk_no_touch_required_per_key/1, sk_regression_non_sk_options/1,
-         sk_regression_non_sk_pubkey_decode/1, sk_regression_non_sk_verify/1,
-         sk_regression_non_sk_auth/1, sk_verify_both_key_types_sequential/1,
-         sk_verify_zero_counter/1, sk_verify_max_counter/1, sk_verify_all_flags/1,
-         sk_mixed_auth_sk_then_standard_fallback/1, sk_option_validate_fido_fun/1,
-         sk_fixture_ecdsa_decode/1, sk_fixture_ed25519_decode/1, sk_fixture_ecdsa_roundtrip/1,
-         sk_fixture_ed25519_roundtrip/1, sk_fixture_auth_keys_single/1,
-         sk_fixture_auth_keys_mixed/1, sk_fixture_malformed_truncated/1,
-         ssh_hostkey_fingerprint_md5_implicit/1, ssh_hostkey_fingerprint_md5/1,
-         ssh_hostkey_fingerprint_sha/1, ssh_hostkey_fingerprint_sha256/1,
-         ssh_hostkey_fingerprint_sha384/1, ssh_hostkey_fingerprint_sha512/1,
-         ssh_hostkey_fingerprint_list/1, chk_known_hosts/1, ssh_hostkey_pkcs8/1,
-         ec_private_key_version_compat/1]).
+         sk_no_touch_required_per_key/1, sk_counter_callback_cannot_bypass_up/1,
+         sk_counter_callback_always_called/1, sk_counter_callback_called_with_notouch/1,
+         sk_regression_non_sk_options/1, sk_regression_non_sk_pubkey_decode/1,
+         sk_regression_non_sk_verify/1, sk_regression_non_sk_auth/1,
+         sk_verify_both_key_types_sequential/1, sk_verify_zero_counter/1, sk_verify_max_counter/1,
+         sk_verify_all_flags/1, sk_mixed_auth_sk_then_standard_fallback/1,
+         sk_option_validate_fido_fun/1, sk_fixture_ecdsa_decode/1, sk_fixture_ed25519_decode/1,
+         sk_fixture_ecdsa_roundtrip/1, sk_fixture_ed25519_roundtrip/1,
+         sk_fixture_auth_keys_single/1, sk_fixture_auth_keys_mixed/1,
+         sk_fixture_malformed_truncated/1, ssh_hostkey_fingerprint_md5_implicit/1,
+         ssh_hostkey_fingerprint_md5/1, ssh_hostkey_fingerprint_sha/1,
+         ssh_hostkey_fingerprint_sha256/1, ssh_hostkey_fingerprint_sha384/1,
+         ssh_hostkey_fingerprint_sha512/1, ssh_hostkey_fingerprint_list/1, chk_known_hosts/1,
+         ssh_hostkey_pkcs8/1, ec_private_key_version_compat/1]).
 
 -include_lib("common_test/include/ct.hrl").
 -include_lib("public_key/include/public_key.hrl").
@@ -151,7 +152,9 @@ groups() ->
        sk_auth_precheck_ecdsa, sk_auth_precheck_ed25519, sk_auth_verify_ecdsa,
        sk_auth_verify_ed25519, sk_auth_wrong_sig_rejected, sk_auth_fallback,
        sk_fido_callback_receives_info, sk_fido_counter_monotonicity, sk_fido_default_no_callback,
-       sk_fido_callback_bad_return, sk_no_touch_required_per_key, sk_regression_non_sk_options,
+       sk_fido_callback_bad_return, sk_no_touch_required_per_key,
+       sk_counter_callback_cannot_bypass_up, sk_counter_callback_always_called,
+       sk_counter_callback_called_with_notouch, sk_regression_non_sk_options,
        sk_regression_non_sk_pubkey_decode, sk_regression_non_sk_verify,
        sk_regression_non_sk_auth, sk_verify_both_key_types_sequential, sk_verify_zero_counter,
        sk_verify_max_counter, sk_verify_all_flags, sk_mixed_auth_sk_then_standard_fallback,
@@ -1860,6 +1863,219 @@ sk_fido_callback_bad_return(_Config) ->
     {not_authorized, {User, undefined}, {#ssh_msg_userauth_failure{}, _}} = Result,
     ct:log("M4.2 bad_return: callback returned 'banana', auth rejected "
            "gracefully").
+
+%%--------------------------------------------------------------------
+%% @doc Prove that a counter callback returning 'ok' cannot bypass
+%% user-presence enforcement.  With UP=0 and no "no-touch-required"
+%% option, auth MUST be rejected even when the callback says ok.
+%% This is the core security invariant: UP policy is decided solely
+%% by the authorized_keys entry, never by a programmatic callback.
+%%--------------------------------------------------------------------
+sk_counter_callback_cannot_bypass_up(_Config) ->
+    Self = self(),
+    %% A callback that always approves and reports invocation.
+    ApproveFun =
+        fun(Info) ->
+           Self ! {counter_approve, Info},
+           ok
+        end,
+    {PubPoint, PrivKey} = crypto:generate_key(ecdh, secp256r1),
+    Application = <<"ssh:">>,
+    Key = {ecdsa_sk, #'ECPoint'{point = PubPoint}, secp256r1, Application},
+    SessionId = crypto:strong_rand_bytes(20),
+    User = "testuser",
+    {Ssh0, Dir} =
+        sk_make_server_ssh(Key, User, SessionId, [{sk_fido_counter_fun, ApproveFun}]),
+
+    AlgStr = "sk-ecdsa-sha2-nistp256@openssh.com",
+    AlgBin = list_to_binary(AlgStr),
+    KeyBlob = iolist_to_binary(ssh_message:ssh2_pubkey_encode(Key)),
+
+    %% UP=0 — user did NOT touch the key
+    Flags = 16#00,
+    Counter = 16#00000001,
+    SigData = ssh_auth:build_sig_data(SessionId, User, "ssh-connection", KeyBlob, AlgStr),
+    SigBlob = sk_sign_ecdsa(PrivKey, Application, SigData, Flags, Counter),
+    Data = sk_build_userauth_data(true, AlgBin, KeyBlob, SigBlob),
+    Msg = #ssh_msg_userauth_request{user = User,
+                                    service = "ssh-connection",
+                                    method = "publickey",
+                                    data = Data},
+    Result = ssh_auth:handle_userauth_request(Msg, SessionId, Ssh0),
+    sk_cleanup_dir(Dir),
+
+    %% Auth MUST be rejected despite the callback returning ok.
+    {not_authorized, _, _} = Result,
+
+    %% The callback should still have been invoked (for tracking).
+    receive
+        {counter_approve, Info} ->
+            #{counter := 1,
+              key := Key,
+              user := "testuser"} =
+                Info,
+            ct:log("counter_callback_cannot_bypass_up: callback invoked with ~p, "
+                   "auth correctly REJECTED",
+                   [Info])
+    after 1000 ->
+        ct:fail("Counter callback was not invoked when UP=0")
+    end.
+
+%%--------------------------------------------------------------------
+%% @doc Verify that the counter callback is always called after a
+%% cryptographically-valid SK signature, regardless of whether user
+%% presence is satisfied.
+%%
+%% Part 1: UP=0, no no-touch-required → callback called, auth rejected.
+%% Part 2: UP=1, no no-touch-required → callback called, auth accepted.
+%%
+%% This ensures applications can track every valid signature attempt
+%% (e.g. to detect cloned keys producing UP=0 signatures).
+%%--------------------------------------------------------------------
+sk_counter_callback_always_called(_Config) ->
+    Self = self(),
+    Ref = make_ref(),
+    TrackFun =
+        fun(Info) ->
+           Self ! {counter_track, Ref, Info},
+           ok
+        end,
+    {PubPoint, PrivKey} = crypto:generate_key(ecdh, secp256r1),
+    Application = <<"ssh:">>,
+    Key = {ecdsa_sk, #'ECPoint'{point = PubPoint}, secp256r1, Application},
+    SessionId = crypto:strong_rand_bytes(20),
+    User = "testuser",
+
+    AlgStr = "sk-ecdsa-sha2-nistp256@openssh.com",
+    AlgBin = list_to_binary(AlgStr),
+    KeyBlob = iolist_to_binary(ssh_message:ssh2_pubkey_encode(Key)),
+
+    %% Part 1: UP=0 — auth rejected but callback still called.
+    {Ssh0, Dir0} =
+        sk_make_server_ssh(Key, User, SessionId, [{sk_fido_counter_fun, TrackFun}]),
+    Flags0 = 16#00,
+    Counter0 = 16#00000010,
+    SigData0 = ssh_auth:build_sig_data(SessionId, User, "ssh-connection", KeyBlob, AlgStr),
+    SigBlob0 = sk_sign_ecdsa(PrivKey, Application, SigData0, Flags0, Counter0),
+    Data0 = sk_build_userauth_data(true, AlgBin, KeyBlob, SigBlob0),
+    Msg0 =
+        #ssh_msg_userauth_request{user = User,
+                                  service = "ssh-connection",
+                                  method = "publickey",
+                                  data = Data0},
+    Result0 = ssh_auth:handle_userauth_request(Msg0, SessionId, Ssh0),
+    sk_cleanup_dir(Dir0),
+    {not_authorized, _, _} = Result0,
+    receive
+        {counter_track, Ref, Info0} ->
+            #{counter := 16#10} = Info0,
+            ct:log("Part 1: UP=0 → callback called with ~p, auth REJECTED", [Info0])
+    after 1000 ->
+        ct:fail("Part 1: counter callback was NOT called when UP=0")
+    end,
+
+    %% Part 2: UP=1 — auth accepted and callback called.
+    {Ssh1, Dir1} =
+        sk_make_server_ssh(Key, User, SessionId, [{sk_fido_counter_fun, TrackFun}]),
+    Flags1 = 16#01,
+    Counter1 = 16#00000020,
+    SigData1 = ssh_auth:build_sig_data(SessionId, User, "ssh-connection", KeyBlob, AlgStr),
+    SigBlob1 = sk_sign_ecdsa(PrivKey, Application, SigData1, Flags1, Counter1),
+    Data1 = sk_build_userauth_data(true, AlgBin, KeyBlob, SigBlob1),
+    Msg1 =
+        #ssh_msg_userauth_request{user = User,
+                                  service = "ssh-connection",
+                                  method = "publickey",
+                                  data = Data1},
+    Result1 = ssh_auth:handle_userauth_request(Msg1, SessionId, Ssh1),
+    sk_cleanup_dir(Dir1),
+    {authorized, User, {#ssh_msg_userauth_success{}, _}} = Result1,
+    receive
+        {counter_track, Ref, Info1} ->
+            #{counter := 16#20} = Info1,
+            ct:log("Part 2: UP=1 → callback called with ~p, auth ACCEPTED", [Info1])
+    after 1000 ->
+        ct:fail("Part 2: counter callback was NOT called when UP=1")
+    end.
+
+%%--------------------------------------------------------------------
+%% @doc Verify that the counter callback is invoked when the key has
+%% "no-touch-required" and UP=0.  Auth should succeed (UP relaxed
+%% per-key) and the callback must still run for counter tracking.
+%%
+%% Also tests that a REJECTING callback still causes auth failure
+%% even when no-touch-required is set — proving the callback's
+%% counter-rejection power is independent of the UP path.
+%%--------------------------------------------------------------------
+sk_counter_callback_called_with_notouch(_Config) ->
+    Self = self(),
+    Ref = make_ref(),
+    TrackFun =
+        fun(Info) ->
+           Self ! {counter_notouch, Ref, Info},
+           ok
+        end,
+    {PubPoint, PrivKey} = crypto:generate_key(ecdh, secp256r1),
+    Application = <<"ssh:">>,
+    Key = {ecdsa_sk, #'ECPoint'{point = PubPoint}, secp256r1, Application},
+    SessionId = crypto:strong_rand_bytes(20),
+    User = "testuser",
+
+    AlgStr = "sk-ecdsa-sha2-nistp256@openssh.com",
+    AlgBin = list_to_binary(AlgStr),
+    KeyBlob = iolist_to_binary(ssh_message:ssh2_pubkey_encode(Key)),
+
+    %% Part 1: no-touch-required + UP=0 + callback returns ok → ACCEPTED.
+    {Ssh0, Dir0} =
+        sk_make_server_ssh_multi_keys([{Key, "no-touch-required"}],
+                                      User,
+                                      SessionId,
+                                      [{sk_fido_counter_fun, TrackFun}]),
+    Flags0 = 16#00,
+    Counter0 = 16#00000042,
+    SigData0 = ssh_auth:build_sig_data(SessionId, User, "ssh-connection", KeyBlob, AlgStr),
+    SigBlob0 = sk_sign_ecdsa(PrivKey, Application, SigData0, Flags0, Counter0),
+    Data0 = sk_build_userauth_data(true, AlgBin, KeyBlob, SigBlob0),
+    Msg0 =
+        #ssh_msg_userauth_request{user = User,
+                                  service = "ssh-connection",
+                                  method = "publickey",
+                                  data = Data0},
+    Result0 = ssh_auth:handle_userauth_request(Msg0, SessionId, Ssh0),
+    sk_cleanup_dir(Dir0),
+    {authorized, User, {#ssh_msg_userauth_success{}, _}} = Result0,
+    receive
+        {counter_notouch, Ref, Info0} ->
+            #{counter := 16#42, key := Key} = Info0,
+            ct:log("Part 1: no-touch-required + UP=0 + callback ok → ACCEPTED, "
+                   "callback received ~p",
+                   [Info0])
+    after 1000 ->
+        ct:fail("Part 1: callback not invoked with no-touch-required")
+    end,
+
+    %% Part 2: no-touch-required + UP=0 + callback REJECTS → REJECTED.
+    %% The counter callback can still reject auth independently of UP.
+    RejectFun = fun(_Info) -> {error, counter_replay_detected} end,
+    {Ssh1, Dir1} =
+        sk_make_server_ssh_multi_keys([{Key, "no-touch-required"}],
+                                      User,
+                                      SessionId,
+                                      [{sk_fido_counter_fun, RejectFun}]),
+    Counter1 = 16#00000043,
+    SigData1 = ssh_auth:build_sig_data(SessionId, User, "ssh-connection", KeyBlob, AlgStr),
+    SigBlob1 = sk_sign_ecdsa(PrivKey, Application, SigData1, Flags0, Counter1),
+    Data1 = sk_build_userauth_data(true, AlgBin, KeyBlob, SigBlob1),
+    Msg1 =
+        #ssh_msg_userauth_request{user = User,
+                                  service = "ssh-connection",
+                                  method = "publickey",
+                                  data = Data1},
+    Result1 = ssh_auth:handle_userauth_request(Msg1, SessionId, Ssh1),
+    sk_cleanup_dir(Dir1),
+    {not_authorized, _, _} = Result1,
+    ct:log("Part 2: no-touch-required + UP=0 + callback rejects → REJECTED "
+           "(counter rejection is independent of UP)").
 
 %%--------------------------------------------------------------------
 sk_auth_fallback(_Config) ->
