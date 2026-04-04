@@ -46,11 +46,9 @@
          sk_verify_wrong_application/1, sk_verify_tampered_flags/1, sk_verify_wrong_key/1,
          sk_verify_ecdsa_padded_mpint/1, sk_auth_precheck_ecdsa/1, sk_auth_precheck_ed25519/1,
          sk_auth_verify_ecdsa/1, sk_auth_verify_ed25519/1, sk_auth_wrong_sig_rejected/1,
-         sk_auth_fallback/1, sk_fido_callback_receives_info/1,
-         sk_fido_callback_rejects_no_presence/1, sk_fido_callback_accepts_presence/1,
-         sk_fido_counter_monotonicity/1, sk_fido_default_no_callback/1,
-         sk_fido_callback_bad_return/1, sk_no_touch_required_per_key/1,
-         sk_callback_receives_key_and_options/1, sk_regression_non_sk_options/1,
+         sk_auth_fallback/1, sk_fido_callback_receives_info/1, sk_fido_counter_monotonicity/1,
+         sk_fido_default_no_callback/1, sk_fido_callback_bad_return/1,
+         sk_no_touch_required_per_key/1, sk_regression_non_sk_options/1,
          sk_regression_non_sk_pubkey_decode/1, sk_regression_non_sk_verify/1,
          sk_regression_non_sk_auth/1, sk_verify_both_key_types_sequential/1,
          sk_verify_zero_counter/1, sk_verify_max_counter/1, sk_verify_all_flags/1,
@@ -152,10 +150,8 @@ groups() ->
        sk_verify_tampered_flags, sk_verify_wrong_key, sk_verify_ecdsa_padded_mpint,
        sk_auth_precheck_ecdsa, sk_auth_precheck_ed25519, sk_auth_verify_ecdsa,
        sk_auth_verify_ed25519, sk_auth_wrong_sig_rejected, sk_auth_fallback,
-       sk_fido_callback_receives_info, sk_fido_callback_rejects_no_presence,
-       sk_fido_callback_accepts_presence, sk_fido_counter_monotonicity,
-       sk_fido_default_no_callback, sk_fido_callback_bad_return, sk_no_touch_required_per_key,
-       sk_callback_receives_key_and_options, sk_regression_non_sk_options,
+       sk_fido_callback_receives_info, sk_fido_counter_monotonicity, sk_fido_default_no_callback,
+       sk_fido_callback_bad_return, sk_no_touch_required_per_key, sk_regression_non_sk_options,
        sk_regression_non_sk_pubkey_decode, sk_regression_non_sk_verify,
        sk_regression_non_sk_auth, sk_verify_both_key_types_sequential, sk_verify_zero_counter,
        sk_verify_max_counter, sk_verify_all_flags, sk_mixed_auth_sk_then_standard_fallback,
@@ -1271,7 +1267,7 @@ sk_make_server_ssh(Key, User, SessionId) ->
 %%--------------------------------------------------------------------
 %% Helper: build a minimal #ssh{} record with multiple authorized keys,
 %% each with optional per-key options (e.g. "no-touch-required").
-%% Keys is a list of {Key, Options} where Options is a string prefix
+%% Keys is a list of {Key, OptionPrefix} where OptionPrefix is a string
 %% (e.g. "no-touch-required") or "" for no options.
 %%--------------------------------------------------------------------
 sk_make_server_ssh_multi_keys(Keys, User, SessionId, ExtraOpts) ->
@@ -1566,8 +1562,10 @@ sk_auth_wrong_sig_rejected(_Config) ->
 
 %%--------------------------------------------------------------------
 sk_fido_callback_receives_info(_Config) ->
-    %% Verify that sk_fido_verify_fun receives a map with the correct
-    %% keys and types after a valid ECDSA-SK auth attempt.
+    %% Verify that sk_fido_counter_fun receives a map with counter,
+    %% key, user, and algorithm after a valid ECDSA-SK auth attempt.
+    %% User presence (UP) is always enforced by the server — the
+    %% callback is only for counter/policy checks, not UP decisions.
     Self = self(),
     VerifyFun =
         fun(Info) ->
@@ -1579,7 +1577,8 @@ sk_fido_callback_receives_info(_Config) ->
     Key = {ecdsa_sk, #'ECPoint'{point = PubPoint}, secp256r1, Application},
     SessionId = crypto:strong_rand_bytes(20),
     User = "testuser",
-    {Ssh0, Dir} = sk_make_server_ssh(Key, User, SessionId, [{sk_fido_verify_fun, VerifyFun}]),
+    {Ssh0, Dir} =
+        sk_make_server_ssh(Key, User, SessionId, [{sk_fido_counter_fun, VerifyFun}]),
 
     AlgStr = "sk-ecdsa-sha2-nistp256@openssh.com",
     AlgBin = list_to_binary(AlgStr),
@@ -1601,105 +1600,20 @@ sk_fido_callback_receives_info(_Config) ->
     %% Collect the info map sent by the callback
     receive
         {fido_info, Info} ->
-            #{flags := F,
-              counter := C,
-              user_presence := UP,
-              user_verification := UV,
-              user := U,
-              algorithm := Alg,
+            #{counter := C,
               key := ReceivedKey,
-              key_options := ReceivedOpts} =
+              user := U,
+              algorithm := Alg} =
                 Info,
-            16#05 = F,
             16#00000042 = C,
-            true = UP,
-            true = UV,
             "testuser" = U,
             'sk-ecdsa-sha2-nistp256@openssh.com' = Alg,
             %% key must match the original key used for signing
             Key = ReceivedKey,
-            %% No options in authorized_keys → empty list
-            [] = ReceivedOpts,
             ct:log("M4.2 callback_receives_info: ~p", [Info])
     after 1000 ->
         ct:fail("Did not receive fido_info from callback")
     end.
-
-%%--------------------------------------------------------------------
-sk_fido_callback_rejects_no_presence(_Config) ->
-    %% When the FIDO flags byte does NOT have user-presence (bit 0)
-    %% set, a policy callback that requires UP should reject auth.
-    VerifyFun =
-        fun (#{user_presence := true}) ->
-                ok;
-            (#{user_presence := false}) ->
-                {error, user_presence_required}
-        end,
-    {PubPoint, PrivKey} = crypto:generate_key(ecdh, secp256r1),
-    Application = <<"ssh:">>,
-    Key = {ecdsa_sk, #'ECPoint'{point = PubPoint}, secp256r1, Application},
-    SessionId = crypto:strong_rand_bytes(20),
-    User = "testuser",
-    {Ssh0, Dir} = sk_make_server_ssh(Key, User, SessionId, [{sk_fido_verify_fun, VerifyFun}]),
-
-    AlgStr = "sk-ecdsa-sha2-nistp256@openssh.com",
-    AlgBin = list_to_binary(AlgStr),
-    KeyBlob = iolist_to_binary(ssh_message:ssh2_pubkey_encode(Key)),
-    Flags = 16#00,   %% NO user presence
-    Counter = 16#00000001,
-
-    SigData = ssh_auth:build_sig_data(SessionId, User, "ssh-connection", KeyBlob, AlgStr),
-    SigBlob = sk_sign_ecdsa(PrivKey, Application, SigData, Flags, Counter),
-    Data = sk_build_userauth_data(true, AlgBin, KeyBlob, SigBlob),
-
-    Msg = #ssh_msg_userauth_request{user = User,
-                                    service = "ssh-connection",
-                                    method = "publickey",
-                                    data = Data},
-    Result = ssh_auth:handle_userauth_request(Msg, SessionId, Ssh0),
-    sk_cleanup_dir(Dir),
-    {not_authorized,
-     {User, undefined},
-     {#ssh_msg_userauth_failure{authentications = Methods}, _}} =
-        Result,
-    true = is_list(Methods) andalso length(Methods) > 0,
-    ct:log("M4.2 rejects_no_presence: correctly rejected, methods=~p", [Methods]).
-
-%%--------------------------------------------------------------------
-sk_fido_callback_accepts_presence(_Config) ->
-    %% Same policy callback as above, but flags=0x01 (UP set) →
-    %% callback returns ok → auth succeeds.  Tests Ed25519-SK path.
-    VerifyFun =
-        fun (#{user_presence := true}) ->
-                ok;
-            (#{user_presence := false}) ->
-                {error, user_presence_required}
-        end,
-    {PubKey, PrivKey} = crypto:generate_key(eddsa, ed25519),
-    Application = <<"ssh:">>,
-    Key = {ed25519_sk, PubKey, Application},
-    SessionId = crypto:strong_rand_bytes(20),
-    User = "testuser",
-    {Ssh0, Dir} = sk_make_server_ssh(Key, User, SessionId, [{sk_fido_verify_fun, VerifyFun}]),
-
-    AlgStr = "sk-ssh-ed25519@openssh.com",
-    AlgBin = list_to_binary(AlgStr),
-    KeyBlob = iolist_to_binary(ssh_message:ssh2_pubkey_encode(Key)),
-    Flags = 16#01,   %% UP set
-    Counter = 16#00000010,
-
-    SigData = ssh_auth:build_sig_data(SessionId, User, "ssh-connection", KeyBlob, AlgStr),
-    SigBlob = sk_sign_ed25519(PrivKey, Application, SigData, Flags, Counter),
-    Data = sk_build_userauth_data(true, AlgBin, KeyBlob, SigBlob),
-
-    Msg = #ssh_msg_userauth_request{user = User,
-                                    service = "ssh-connection",
-                                    method = "publickey",
-                                    data = Data},
-    Result = ssh_auth:handle_userauth_request(Msg, SessionId, Ssh0),
-    sk_cleanup_dir(Dir),
-    {authorized, User, {#ssh_msg_userauth_success{}, _}} = Result,
-    ct:log("M4.2 accepts_presence: Ed25519-SK auth succeeded with UP flag").
 
 %%--------------------------------------------------------------------
 sk_fido_counter_monotonicity(_Config) ->
@@ -1718,7 +1632,8 @@ sk_fido_counter_monotonicity(_Config) ->
     Key = {ecdsa_sk, #'ECPoint'{point = PubPoint}, secp256r1, Application},
     SessionId = crypto:strong_rand_bytes(20),
     User = "testuser",
-    {Ssh0, Dir} = sk_make_server_ssh(Key, User, SessionId, [{sk_fido_verify_fun, VerifyFun}]),
+    {Ssh0, Dir} =
+        sk_make_server_ssh(Key, User, SessionId, [{sk_fido_counter_fun, VerifyFun}]),
 
     AlgStr = "sk-ecdsa-sha2-nistp256@openssh.com",
     AlgBin = list_to_binary(AlgStr),
@@ -1770,7 +1685,8 @@ sk_fido_counter_monotonicity(_Config) ->
 
 %%--------------------------------------------------------------------
 sk_fido_default_no_callback(_Config) ->
-    %% With no sk_fido_verify_fun callback configured, the server
+    %% With no sk_fido_counter_fun callback configured and no
+    %% "no-touch-required" option in authorized_keys, the server
     %% enforces user presence (UP) by default — matching OpenSSH's
     %% PUBKEYAUTH_TOUCH_REQUIRED behaviour.
     %%
@@ -1781,7 +1697,7 @@ sk_fido_default_no_callback(_Config) ->
     Key = {ed25519_sk, PubKey, Application},
     SessionId = crypto:strong_rand_bytes(20),
     User = "testuser",
-    %% No sk_fido_verify_fun — uses default (undefined)
+    %% No sk_fido_counter_fun — uses default (undefined)
     {Ssh0, Dir} = sk_make_server_ssh(Key, User, SessionId),
 
     AlgStr = "sk-ssh-ed25519@openssh.com",
@@ -1826,7 +1742,8 @@ sk_fido_default_no_callback(_Config) ->
 %% @doc Two SK keys for the same user: one with "no-touch-required" in
 %% authorized_keys, one without.  Verify that UP=0 is accepted for the
 %% first key and rejected for the second — matching OpenSSH per-key
-%% policy.
+%% policy.  The callback cannot override this; it is purely a property
+%% of the authorized_keys entry.
 sk_no_touch_required_per_key(_Config) ->
     %% Key A: no-touch-required (headless service key)
     {PubPointA, PrivKeyA} = crypto:generate_key(ecdh, secp256r1),
@@ -1912,70 +1829,8 @@ sk_no_touch_required_per_key(_Config) ->
     ct:log("sk_no_touch_required_per_key: all three sub-tests passed").
 
 %%--------------------------------------------------------------------
-%% @doc Verify that the sk_fido_verify_fun callback receives the new
-%% `key' and `key_options' fields in the FidoInfo map.
-sk_callback_receives_key_and_options(_Config) ->
-    Self = self(),
-    VerifyFun =
-        fun(Info) ->
-           Self ! {fido_info2, Info},
-           ok
-        end,
-    {PubPoint, PrivKey} = crypto:generate_key(ecdh, secp256r1),
-    Application = <<"ssh:">>,
-    Key = {ecdsa_sk, #'ECPoint'{point = PubPoint}, secp256r1, Application},
-    SessionId = crypto:strong_rand_bytes(20),
-    User = "testuser",
-    %% Use the multi-key helper with no-touch-required option
-    {Ssh0, Dir} =
-        sk_make_server_ssh_multi_keys([{Key, "no-touch-required"}],
-                                      User,
-                                      SessionId,
-                                      [{sk_fido_verify_fun, VerifyFun}]),
-
-    AlgStr = "sk-ecdsa-sha2-nistp256@openssh.com",
-    AlgBin = list_to_binary(AlgStr),
-    KeyBlob = iolist_to_binary(ssh_message:ssh2_pubkey_encode(Key)),
-    Flags = 16#05,
-    Counter = 16#00000099,
-
-    SigData = ssh_auth:build_sig_data(SessionId, User, "ssh-connection", KeyBlob, AlgStr),
-    SigBlob = sk_sign_ecdsa(PrivKey, Application, SigData, Flags, Counter),
-    Data = sk_build_userauth_data(true, AlgBin, KeyBlob, SigBlob),
-
-    Msg = #ssh_msg_userauth_request{user = User,
-                                    service = "ssh-connection",
-                                    method = "publickey",
-                                    data = Data},
-    Result = ssh_auth:handle_userauth_request(Msg, SessionId, Ssh0),
-    sk_cleanup_dir(Dir),
-    {authorized, User, {#ssh_msg_userauth_success{}, _}} = Result,
-    receive
-        {fido_info2, Info} ->
-            %% Verify new fields exist and have correct values
-            #{key := ReceivedKey,
-              key_options := ReceivedOpts,
-              flags := F,
-              counter := C,
-              user := U,
-              algorithm := Alg} =
-                Info,
-            %% key must match the original key
-            Key = ReceivedKey,
-            %% key_options must contain "no-touch-required"
-            true = lists:member("no-touch-required", ReceivedOpts),
-            16#05 = F,
-            16#00000099 = C,
-            "testuser" = U,
-            'sk-ecdsa-sha2-nistp256@openssh.com' = Alg,
-            ct:log("callback received key=~p opts=~p", [ReceivedKey, ReceivedOpts])
-    after 1000 ->
-        ct:fail("Did not receive fido_info2 from callback")
-    end.
-
-%%--------------------------------------------------------------------
 sk_fido_callback_bad_return(_Config) ->
-    %% If sk_fido_verify_fun returns something unexpected (not ok,
+    %% If sk_fido_counter_fun returns something unexpected (not ok,
     %% not {error,_}), auth should be rejected (not crash).
     VerifyFun = fun(_Info) -> banana end,
     {PubPoint, PrivKey} = crypto:generate_key(ecdh, secp256r1),
@@ -1983,7 +1838,8 @@ sk_fido_callback_bad_return(_Config) ->
     Key = {ecdsa_sk, #'ECPoint'{point = PubPoint}, secp256r1, Application},
     SessionId = crypto:strong_rand_bytes(20),
     User = "testuser",
-    {Ssh0, Dir} = sk_make_server_ssh(Key, User, SessionId, [{sk_fido_verify_fun, VerifyFun}]),
+    {Ssh0, Dir} =
+        sk_make_server_ssh(Key, User, SessionId, [{sk_fido_counter_fun, VerifyFun}]),
 
     AlgStr = "sk-ecdsa-sha2-nistp256@openssh.com",
     AlgBin = list_to_binary(AlgStr),
@@ -2051,10 +1907,10 @@ sk_auth_fallback(_Config) ->
 sk_regression_non_sk_options(_Config) ->
     %% Verify that our changes to ssh_options.erl do not break
     %% non-SK server/client option handling.
-    %% 1. Default server options: sk_fido_verify_fun = undefined
+    %% 1. Default server options: sk_fido_counter_fun = undefined
     Opts1 = ssh_options:handle_options(server, [{system_dir, "/tmp"}]),
     true = is_map(Opts1),
-    undefined = maps:get(sk_fido_verify_fun, Opts1),
+    undefined = maps:get(sk_fido_counter_fun, Opts1),
 
     %% 2. Non-SK options still work
     Opts2 =
@@ -2065,9 +1921,9 @@ sk_regression_non_sk_options(_Config) ->
     true = maps:get(no_auth_needed, Opts2),
     10 = maps:get(max_sessions, Opts2),
 
-    %% 3. Client options do NOT have sk_fido_verify_fun
+    %% 3. Client options do NOT have sk_fido_counter_fun
     Opts3 = ssh_options:handle_options(client, [{user_dir, "/tmp"}]),
-    false = maps:is_key(sk_fido_verify_fun, Opts3),
+    false = maps:is_key(sk_fido_counter_fun, Opts3),
 
     %% 4. preferred_algorithms with only non-SK algos works
     Opts4 =
@@ -2410,35 +2266,35 @@ sk_mixed_auth_sk_then_standard_fallback(_Config) ->
 
 %%--------------------------------------------------------------------
 sk_option_validate_fido_fun(_Config) ->
-    %% Validate that sk_fido_verify_fun accepts correct values and
+    %% Validate that sk_fido_counter_fun accepts correct values and
     %% rejects invalid ones.
     %% Accepted: undefined (default)
-    #{sk_fido_verify_fun := undefined} =
+    #{sk_fido_counter_fun := undefined} =
         ssh_options:handle_options(server, [{system_dir, "/tmp"}]),
 
     %% Accepted: fun/1
     F1 = fun(_) -> ok end,
-    #{sk_fido_verify_fun := F1} =
-        ssh_options:handle_options(server, [{system_dir, "/tmp"}, {sk_fido_verify_fun, F1}]),
+    #{sk_fido_counter_fun := F1} =
+        ssh_options:handle_options(server, [{system_dir, "/tmp"}, {sk_fido_counter_fun, F1}]),
 
     %% Rejected: integer
     {error, _} =
-        ssh_options:handle_options(server, [{system_dir, "/tmp"}, {sk_fido_verify_fun, 42}]),
+        ssh_options:handle_options(server, [{system_dir, "/tmp"}, {sk_fido_counter_fun, 42}]),
 
     %% Rejected: fun/0 (wrong arity)
     {error, _} =
         ssh_options:handle_options(server,
-                                   [{system_dir, "/tmp"}, {sk_fido_verify_fun, fun() -> ok end}]),
+                                   [{system_dir, "/tmp"}, {sk_fido_counter_fun, fun() -> ok end}]),
 
     %% Rejected: fun/2 (wrong arity)
     {error, _} =
         ssh_options:handle_options(server,
                                    [{system_dir, "/tmp"},
-                                    {sk_fido_verify_fun, fun(_, _) -> ok end}]),
+                                    {sk_fido_counter_fun, fun(_, _) -> ok end}]),
 
     %% Rejected: atom (not undefined)
     {error, _} =
-        ssh_options:handle_options(server, [{system_dir, "/tmp"}, {sk_fido_verify_fun, true}]),
+        ssh_options:handle_options(server, [{system_dir, "/tmp"}, {sk_fido_counter_fun, true}]),
 
     ct:log("M6.1 option_validate_fido_fun: all validation checks OK").
 

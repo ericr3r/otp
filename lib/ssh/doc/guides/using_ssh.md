@@ -471,49 +471,56 @@ Eshell V15.0  (abort with ^G)
 1>
 ```
 
-### Custom FIDO Verification
+### FIDO Counter Enforcement
 
-By default, the server requires user presence (UP — the authenticator touch
-flag) for all SK signatures, matching OpenSSH's `PUBKEYAUTH_TOUCH_REQUIRED`
-policy — unless the key's `authorized_keys` line includes the
-`no-touch-required` option, in which case user presence is automatically
-relaxed for that key without any callback needed.
+User presence (UP — the authenticator touch flag) is **enforced by default**
+for all FIDO security key authentications.  Every SK signature must have the
+UP bit set, meaning the user must physically touch the authenticator.
 
-To enforce additional policy (for example, also requiring user verification
-via PIN or biometric), use the `sk_fido_verify_fun` daemon option:
+The **only** way to relax this requirement is to prefix a key with
+`no-touch-required` in the server's `authorized_keys` file.  This is a
+per-key setting, consistent with OpenSSH's behaviour, and is intended for
+headless or automated service keys that cannot involve a physical touch:
+
+```text
+sk-ssh-ed25519@openssh.com AAAA... human-key
+no-touch-required sk-ssh-ed25519@openssh.com AAAA... headless-service-key
+```
+
+Keys without the `no-touch-required` prefix continue to require a physical
+touch on every authentication.
+
+An optional `sk_fido_counter_fun` daemon callback can be configured to
+enforce **signature counter monotonicity** — that is, to detect cloned
+security keys by rejecting signatures where the counter has not increased
+since the last successful authentication.  The callback is purely for
+counter tracking and **cannot override UP enforcement**; user presence
+policy is determined solely by the `authorized_keys` entry for each key.
 
 ```erlang
 {ok, Sshd} = ssh:daemon(8989,
                          [{system_dir, "/tmp/ssh_daemon"},
                           {user_dir, "/tmp/otptest_user/.ssh"},
-                          {sk_fido_verify_fun,
-                           fun(#{user_presence := true,
-                                 user_verification := true}) -> ok;
-                              (_) -> {error, verification_required}
+                          {sk_fido_counter_fun,
+                           fun(#{counter := Counter, key := Key, user := User}) ->
+                               case my_counter_db:check_and_update(User, Key, Counter) of
+                                   ok -> ok;
+                                   {error, _} = Err -> Err
+                               end
                            end}]).
 ```
 
 The callback receives a map with the following keys:
 
-- `flags` — raw authenticator flags byte
-- `counter` — signature counter
-- `user_presence` — whether the UP flag was set
-- `user_verification` — whether the UV flag was set
-- `user` — the username being authenticated
-- `algorithm` — the public key algorithm (`ecdsa-sk` or `ed25519-sk`)
+- `counter` — the 32-bit signature counter from the authenticator
 - `key` — the public key used for authentication
-- `key_options` — per-key options from `authorized_keys` (e.g. `["no-touch-required"]`)
+- `user` — the username being authenticated (string)
+- `algorithm` — the public key algorithm atom
+
+The callback must return `ok` to allow authentication, or `{error, Reason}`
+to reject it.
 
 See the [SSH Application](ssh_app.md) reference for details.
-
-> **Note:** When `no-touch-required` is set in `authorized_keys` for a given
-> key, the server honours it automatically (per-key) and skips the UP check
-> for that key.  No `sk_fido_verify_fun` callback is needed for this common
-> case — simply add the option to the `authorized_keys` line:
->
-> ```
-> no-touch-required sk-ssh-ed25519@openssh.com AAAAGnN...== user@host
-> ```
 
 ## SFTP Server
 

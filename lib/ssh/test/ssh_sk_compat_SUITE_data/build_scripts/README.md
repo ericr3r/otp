@@ -98,7 +98,7 @@ The suite will automatically:
 
 No manual verification step is needed — the `check_docker_sk_present`
 test case confirms `sk-dummy.so` is present in the image, and the
-remaining 13 test cases exercise the full end-to-end authentication
+remaining 14 test cases exercise the full end-to-end authentication
 flow for both key types.
 
 ### Test Cases
@@ -111,14 +111,16 @@ flow for both key types.
 | `sk_login_ecdsa_otp_is_server` | End-to-end: OpenSSH client authenticates to Erlang sshd with ECDSA-SK |
 | `sk_login_ed25519_otp_is_server` | End-to-end: OpenSSH client authenticates to Erlang sshd with Ed25519-SK |
 | `sk_login_both_types_otp_is_server` | Tests both SK key types in sequence |
-| `sk_login_fido_callback_enforced` | Verifies `sk_fido_verify_fun` callback is invoked with correct FIDO info |
-| `sk_login_fido_callback_rejects` | Verifies a rejecting callback causes auth failure |
+| `sk_login_fido_callback_enforced` | Verifies `sk_fido_counter_fun` callback is invoked with correct counter info |
+| `sk_login_fido_callback_rejects` | Verifies a rejecting counter callback causes auth failure |
+| `sk_no_touch_required_per_key` | Verifies `no-touch-required` prefix in `authorized_keys` is parsed and honoured end-to-end |
 | `sk_login_wrong_key_rejected` | Verifies an unauthorized SK key is rejected |
 | `sk_login_password_fallback_from_sk` | Verifies fallback to password auth when SK key is not authorized |
 | `sk_exec_after_sk_auth` | Verifies exec channel works after SK authentication |
 | `sk_sftp_after_sk_auth` | Verifies SFTP subsystem works after SK authentication |
+| `sk_default_up_enforcement` | Verifies UP is always enforced (no callback needed; sk-dummy.so sets UP=1) |
 | `sk_counter_increases` | Verifies the FIDO counter (0x12345678 from sk-dummy.so) is propagated |
-| `sk_flags_propagated` | Verifies FIDO flags (UP, UV) are correctly propagated to the callback |
+| `sk_flags_propagated` | Verifies UP enforcement works end-to-end without any callback configured |
 
 ## How sk-dummy.so Works
 
@@ -171,7 +173,8 @@ key storage mechanism differs from real hardware.
 │  │    → ssh_transport:do_verify/5            ││
 │  │      → fido_authenticator_data/4          ││
 │  │      → public_key:verify/5                ││
-│  │    → sk_fido_verify_fun callback          ││
+│  │    → UP enforcement (always required)     ││
+│  │    → sk_fido_counter_fun callback         ││
 │  └──────────────────────────────────────────┘│
 └──────────────────────────────────────────────┘
 ```

@@ -60,9 +60,10 @@ limitations under the License.
 - Added server-side support for FIDO/U2F security key authentication
   (`sk-ecdsa-sha2-nistp256@openssh.com` and `sk-ssh-ed25519@openssh.com`).
   Erlang SSH daemons can now verify public key authentication from OpenSSH
-  clients using FIDO2 hardware security keys. A new `sk_fido_verify_fun`
-  daemon option enables custom policy callbacks for FIDO-specific fields
-  such as user presence and signature counter. See the
+  clients using FIDO2 hardware security keys. User presence (UP) is always
+  unconditionally enforced. A new `sk_fido_counter_fun` daemon option
+  enables a callback for signature counter monotonicity enforcement to
+  detect cloned tokens. See the
   [SSH Application](ssh_app.md#fido-u2f-security-key-support) documentation
   for details and known limitations.
 

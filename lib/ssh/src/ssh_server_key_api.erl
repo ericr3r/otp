@@ -70,10 +70,11 @@ is available with the key `key_cb_private`.
 Checks if the user key is authorized.
 
 May return `{true, KeyOptions}` instead of `true` to pass per-key
-options from `authorized_keys` through to FIDO/U2F policy checks.
-For example, a key line starting with `no-touch-required` will
-produce `{true, ["no-touch-required"]}`, which relaxes the default
-user-presence requirement for FIDO security keys.
+options parsed from the `authorized_keys` line.  For example, a line
+starting with `no-touch-required` produces
+`{true, ["no-touch-required"]}`, which tells the server to skip the
+FIDO user-presence (UP) check for that key — matching OpenSSH's
+per-key `no-touch-required` behaviour.
 
 Implementations that return plain `boolean()` continue to work
 unchanged — the server treats `true` as equivalent to `{true, []}`.

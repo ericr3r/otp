@@ -502,10 +502,11 @@ default(server) ->
                            #{default => false,
                              chk => fun(V) -> erlang:is_boolean(V) end,
                              class => user_option},
-                       %% FIDO/U2F policy callback; invoked after SK signature
-                       %% verification succeeds.  fun(FidoInfo) -> ok | {error,_}.
-                       %% See ssh.hrl for the sk_fido_info() type definition.
-                       sk_fido_verify_fun =>
+                       %% FIDO/U2F counter monotonicity callback; invoked after
+                       %% SK signature verification and UP enforcement succeed.
+                       %% fun(CounterInfo) -> ok | {error,_}.
+                       %% See ssh.hrl for the sk_fido_counter_info() type.
+                       sk_fido_counter_fun =>
                            #{default => undefined,
                              chk =>
                                  fun (undefined) ->

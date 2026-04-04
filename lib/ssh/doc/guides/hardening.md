@@ -267,56 +267,51 @@ handling plugin `m:ssh_file`. The alternatives are:
 ## FIDO Security Key Verification Policy
 
 When accepting FIDO/U2F security key authentication (`ecdsa-sk` or
-`ed25519-sk` keys from OpenSSH clients), the server **requires user presence
-(UP) by default unless the key's authorized_keys line has
-`no-touch-required`** — signatures without the authenticator-touch flag set
-are rejected for keys that do not carry this option.  This matches OpenSSH's
-default `PUBKEYAUTH_TOUCH_REQUIRED` policy and prevents automated use of a
-key that was left plugged in.
+`ed25519-sk` keys from OpenSSH clients), the server **enforces user presence
+(UP) by default**.  Signatures without the authenticator-touch flag set are
+rejected, meaning the user must physically touch the security key.  This
+prevents automated use of a key that was left plugged in.
 
-The `no-touch-required` option in `authorized_keys` is now honoured
-automatically on a per-key basis.  When a key's entry includes this option,
-the server skips the user-presence check for that key only — no callback is
-needed for this simple case.  Just add the option to the key's
-`authorized_keys` line:
+The **only** way to relax the UP requirement is to prefix a key with
+`no-touch-required` in the daemon's `authorized_keys` file.  This is a
+per-key option, matching OpenSSH's behaviour, and is intended for headless
+or automated service accounts that cannot perform a physical touch:
 
-```
-no-touch-required sk-ecdsa-sha2-nistp256@openssh.com AAAAInN...== user@host
+```text
+sk-ssh-ed25519@openssh.com AAAA... human-key
+no-touch-required sk-ssh-ed25519@openssh.com AAAA... headless-service-key
 ```
 
-Additional policy can be applied via the `sk_fido_verify_fun` daemon option.
-This callback is invoked after cryptographic verification succeeds and receives
-a map containing the authenticator flags, signature counter, user presence
-status, and other FIDO-specific fields.
+The `sk_fido_counter_fun` daemon callback **cannot** override or change the
+UP policy — it is purely for **signature counter monotonicity** enforcement.
+The callback is invoked after cryptographic verification and UP enforcement
+have both succeeded, and receives a map with the following keys:
 
-Common hardening and policy adjustments:
+- `counter` — the 32-bit signature counter from the authenticator
+- `key` — the decoded public key used for authentication
+- `user` — the username being authenticated (string)
+- `algorithm` — the negotiated algorithm atom
 
-- **Require user verification** — tighten the default policy to also require
-  PIN or biometric verification in addition to physical touch:
+The callback must return `ok` to allow authentication, or `{error, Reason}` to
+reject it.
+
+- **Counter monotonicity enforcement** — track per-key counters to detect
+  cloned tokens.  The Erlang SSH server does not enforce counter monotonicity
+  by default (nor does OpenSSH), but the `sk_fido_counter_fun` callback
+  enables applications to implement their own tracking:
 
   ```erlang
-  {sk_fido_verify_fun,
-   fun(#{user_presence := true, user_verification := true}) -> ok;
-      (_) -> {error, verification_required}
+  {sk_fido_counter_fun,
+   fun(#{counter := Counter, key := Key}) ->
+       case my_counter_db:check_and_update(Key, Counter) of
+           ok -> ok;
+           {error, _} = Err -> Err
+       end
    end}
   ```
 
-- **Relax user presence globally** — equivalent to applying `no-touch-required`
-  to every key via a callback.  Accept any valid SK signature regardless of
-  flags (note: for the simple per-key case, prefer adding `no-touch-required`
-  to the `authorized_keys` line instead of using a callback):
-
-  ```erlang
-  {sk_fido_verify_fun, fun(_) -> ok end}
-  ```
-
-- **Counter tracking** — the FIDO counter is included in the callback map.
-  Applications can implement their own persistent counter tracking to detect
-  cloned tokens.  The Erlang SSH server does not enforce counter monotonicity
-  by default (nor does OpenSSH).
-
 See the [SSH Application](ssh_app.md#fido-u2f-security-key-support)
-documentation for the full list of fields in the callback map.
+documentation for full details.
 
 ## Hardening in the cryptographic area
 

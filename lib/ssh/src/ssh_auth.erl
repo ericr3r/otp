@@ -531,8 +531,12 @@ pre_verify_sig(User, KeyBlob, #ssh{opts = Opts}) ->
 %%   byte     flags            (bit 0: UP user-presence, bit 2: UV user-verified)
 %%   uint32   counter          (monotonic signature counter)
 %%
-%% After cryptographic verification, the optional sk_fido_verify_fun
-%% callback is invoked for policy enforcement (e.g. require touch).
+%% After cryptographic verification, user presence (UP) is enforced
+%% matching OpenSSH's PUBKEYAUTH_TOUCH_REQUIRED — unless the key's
+%% authorized_keys line carries "no-touch-required", in which case
+%% UP is not checked for that key (same as OpenSSH per-key override).
+%% The optional sk_fido_counter_fun callback is then invoked so
+%% applications can enforce signature-counter monotonicity.
 verify_sig(SessionId, User, Service, AlgBin, KeyBlob, SigWLen, #ssh{opts = Opts} = Ssh)
     when AlgBin =:= <<"sk-ecdsa-sha2-nistp256@openssh.com">>;
          AlgBin =:= <<"sk-ssh-ed25519@openssh.com">> ->
@@ -543,9 +547,7 @@ verify_sig(SessionId, User, Service, AlgBin, KeyBlob, SigWLen, #ssh{opts = Opts}
                          proplists:get_value(public_key, ?GET_OPT(preferred_algorithms, Opts))),
         Key = ssh_message:ssh2_pubkey_decode(KeyBlob),
         %% is_auth_key may return true | {true, KeyOpts} | false.
-        %% Normalize to {true, KeyOpts} for the SK path so we can
-        %% thread per-key authorized_keys options (e.g. no-touch-required)
-        %% into the FIDO policy check.
+        %% Extract per-key options so we can honour "no-touch-required".
         KeyOpts =
             case ssh_transport:call_KeyCb(is_auth_key, [Key, User], Opts) of
                 {true, KO} when is_list(KO) ->
@@ -582,45 +584,41 @@ verify_sig(SessionId, User, Service, AlgBin, KeyBlob, SigWLen, #ssh{opts = Opts}
             end,
         case ssh_transport:verify(PlainText, list_to_existing_atom(Alg), Sig, Key, Ssh) of
             true ->
-                %% Crypto verification succeeded; now enforce FIDO policy.
+                %% Crypto verification succeeded.
                 %%
-                %% OpenSSH checks per-key options from authorized_keys to
-                %% decide whether user presence is required.  The default
-                %% is PUBKEYAUTH_TOUCH_REQUIRED; the "no-touch-required"
-                %% option on an authorized_keys line relaxes it for that
-                %% specific key.
-                %%
-                %% We mirror this: KeyOpts from is_auth_key carries the
-                %% per-key options.  When no callback is configured we
-                %% enforce UP unless the key has "no-touch-required".
-                %% When a callback IS configured it gets both the FIDO
-                %% flags and the per-key options and can make its own
-                %% decision.
+                %% 1. Enforce user presence (UP).
+                %%    OpenSSH requires UP for SK signatures by default
+                %%    (PUBKEYAUTH_TOUCH_REQUIRED).  The only way to
+                %%    relax this is the "no-touch-required" option on
+                %%    the key's authorized_keys line — matching OpenSSH.
+                %%    There is no programmatic override via callback.
                 UserPresence = Flags band 16#01 =/= 0,
                 NoTouchRequired = lists:member("no-touch-required", KeyOpts),
-                FidoInfo =
-                    #{flags => Flags,
-                      counter => Counter,
-                      user_presence => UserPresence,
-                      user_verification => Flags band 16#04 =/= 0,  % FIDO UV flag
-                      user => User,
-                      algorithm => list_to_existing_atom(Alg),
-                      key => Key,
-                      key_options => KeyOpts},
-                case ?GET_OPT(sk_fido_verify_fun, Opts) of
-                    undefined ->
-                        %% No policy callback — enforce UP by default,
-                        %% matching OpenSSH's PUBKEYAUTH_TOUCH_REQUIRED,
-                        %% unless this key has "no-touch-required".
-                        NoTouchRequired orelse UserPresence;
-                    VerifyFun when is_function(VerifyFun, 1) ->
-                        case VerifyFun(FidoInfo) of
-                            ok ->
+                case NoTouchRequired orelse UserPresence of
+                    false ->
+                        false;
+                    true ->
+                        %% 2. Optionally enforce counter monotonicity.
+                        %%    The sk_fido_counter_fun callback lets
+                        %%    applications track the last-seen counter
+                        %%    per key and reject replayed/cloned tokens.
+                        case ?GET_OPT(sk_fido_counter_fun, Opts) of
+                            undefined ->
                                 true;
-                            {error, _Reason} ->
-                                false;
-                            _ ->
-                                false
+                            CounterFun when is_function(CounterFun, 1) ->
+                                CounterInfo =
+                                    #{counter => Counter,
+                                      key => Key,
+                                      user => User,
+                                      algorithm => list_to_existing_atom(Alg)},
+                                case CounterFun(CounterInfo) of
+                                    ok ->
+                                        true;
+                                    {error, _Reason} ->
+                                        false;
+                                    _ ->
+                                        false
+                                end
                         end
                 end;
             false ->

@@ -418,101 +418,97 @@ These algorithms follow the format defined in the
 [OpenSSH PROTOCOL.u2f](https://github.com/openssh/openssh-portable/blob/master/PROTOCOL.u2f)
 specification.
 
-### Daemon option: sk_fido_verify_fun
+### Daemon option: sk_fido_counter_fun
 
-An optional callback can be set on the daemon to apply custom policy after
-cryptographic verification succeeds.  The callback receives a map with the
-following keys:
+User presence (UP — the authenticator touch flag) is **enforced by default**
+for all FIDO security key authentications.  Every SK signature must have the
+UP bit set, meaning the user must physically touch the authenticator.
 
-- `flags` — the raw flags byte from the FIDO authenticator data
-- `counter` — the 32-bit signature counter
-- `user_presence` — `true` if the User Presence (UP) flag is set
-- `user_verification` — `true` if the User Verified (UV) flag is set
+The **only** way to relax this requirement is to prefix a key with
+`no-touch-required` in the server's `authorized_keys` file.  This is a
+per-key option, identical to how OpenSSH handles it:
+
+```text
+sk-ssh-ed25519@openssh.com AAAA... human-key
+no-touch-required sk-ssh-ed25519@openssh.com AAAA... headless-service-key
+```
+
+In the example above, the first key requires a physical touch on every
+authentication (the default).  The second key — marked `no-touch-required` —
+allows authentication without the UP flag, which is useful for headless or
+automated service accounts.
+
+The `sk_fido_counter_fun` callback **cannot** override user presence policy.
+It is purely for **signature counter monotonicity** enforcement.  The
+callback receives a map of type `sk_fido_counter_info()` with the following
+keys:
+
+- `counter` — the 32-bit signature counter from the authenticator
+- `key` — the decoded public key used for authentication
 - `user` — the username being authenticated (string)
 - `algorithm` — the negotiated algorithm atom
-- `key` — the decoded public key used for authentication
-- `key_options` — a list of option strings parsed from the key's
-  `authorized_keys` line (e.g., `["no-touch-required"]`).  When the key's
-  entry has no options, this is the empty list `[]`.
 
 The callback must return `ok` to allow authentication, or `{error, Reason}` to
 reject it.
 
 #### Default behaviour (no callback configured)
 
-If `sk_fido_verify_fun` is not set (the default), user presence (UP — the
-authenticator touch flag) is **required** — *unless* the key's `authorized_keys`
-line carries the `no-touch-required` option.  When `no-touch-required` is
-present for a key, signatures from that key are accepted even when the UP bit is
-not set.  This matches OpenSSH's per-key `no-touch-required` behaviour.
-
-In other words, with no callback you can have mixed policies in
-`authorized_keys`:
-
-```
-sk-ssh-ed25519@openssh.com AAAA... human-key
-no-touch-required sk-ssh-ed25519@openssh.com AAAA... headless-service-key
-```
-
-The first key (`human-key`) requires a physical touch on the authenticator.
-The second key (`headless-service-key`) allows authentication without a touch,
-which is useful for automated / headless service accounts.
+If `sk_fido_counter_fun` is not set (the default), user presence is enforced
+(unless the key is marked `no-touch-required` in `authorized_keys`) but no
+counter monotonicity checking is performed.  The FIDO signature counter is
+included in cryptographic verification (so tampering causes verification
+failure), but the server does not track `last_seen_counter` per key or reject
+signatures where `counter <= last_seen_counter`.
 
 #### Custom callback behaviour
 
-When a callback IS configured via `sk_fido_verify_fun`, it receives the full
-info map — including `key_options` — and has full control over the
-authentication decision.  The default `no-touch-required` handling described
-above is *not* applied; the callback is responsible for implementing whatever
-per-key policy it needs using the `key_options` list.
+When a callback is configured via `sk_fido_counter_fun`, it is invoked after
+cryptographic verification succeeds (and after UP enforcement, unless the key
+is marked `no-touch-required`).  The callback's sole purpose is to implement
+persistent counter tracking to detect cloned authenticator tokens — it
+**cannot** change user presence policy.
 
-Example — relax the user-presence requirement globally (equivalent to
-OpenSSH's `no-touch-required` authorized_keys option):
+Example — enforce counter monotonicity using an ETS table:
 
 ```erlang
+%% Create a table to track last-seen counters
+ets:new(fido_counters, [named_table, public]),
+
 ssh:daemon(2222,
            [{system_dir, "/etc/ssh"},
-            {sk_fido_verify_fun,
-             fun(_) -> ok end}]).
+            {sk_fido_counter_fun,
+             fun(#{counter := Counter, key := Key}) ->
+                 case ets:lookup(fido_counters, Key) of
+                     [{_, LastCounter}] when Counter =< LastCounter ->
+                         {error, counter_regression};
+                     _ ->
+                         ets:insert(fido_counters, {Key, Counter}),
+                         ok
+                 end
+             end}]).
 ```
 
 > #### Note {: .info }
 >
-> With the default per-key `no-touch-required` support described above, you
-> no longer need a blanket `fun(_) -> ok end` callback just to allow
-> touch-less keys.  Simply add `no-touch-required` to the relevant
-> `authorized_keys` entries and leave `sk_fido_verify_fun` unset.
+> The `sk_fido_counter_fun` callback is purely for counter monotonicity
+> enforcement.  It cannot override user presence (UP) policy.  UP is
+> controlled exclusively by the presence or absence of `no-touch-required`
+> in `authorized_keys` — not by this callback.
 
-Example — tighten the policy to also require user verification (PIN or
-biometric):
-
-```erlang
-ssh:daemon(2222,
-           [{system_dir, "/etc/ssh"},
-            {sk_fido_verify_fun,
-             fun(#{user_presence := true, user_verification := true}) -> ok;
-                (_) -> {error, verification_required}
-             end}]).
-```
-
-Example — honour per-key `no-touch-required` from `authorized_keys` inside a
-custom callback, while enforcing touch for all other keys:
+Example — counter tracking with per-user logging:
 
 ```erlang
 ssh:daemon(2222,
            [{system_dir, "/etc/ssh"},
-            {sk_fido_verify_fun,
-             fun(#{key_options := Opts} = Info) ->
-                 case lists:member("no-touch-required", Opts) of
-                     true ->
-                         %% Key is marked no-touch-required — allow it
+            {sk_fido_counter_fun,
+             fun(#{counter := Counter, key := Key, user := User}) ->
+                 case check_and_update_counter(Key, Counter) of
+                     ok ->
+                         logger:info("FIDO auth: user=~s counter=~p", [User, Counter]),
                          ok;
-                     false ->
-                         %% Otherwise require user presence
-                         case Info of
-                             #{user_presence := true} -> ok;
-                             _ -> {error, touch_required}
-                         end
+                     {error, _} = Err ->
+                         logger:warning("FIDO counter regression: user=~s counter=~p", [User, Counter]),
+                         Err
                  end
              end}]).
 ```
@@ -524,14 +520,11 @@ ssh:daemon(2222,
   FIDO signing would require hardware middleware (e.g., `libfido2`) and is out
   of scope.
 
-- **No signature counter enforcement** — the FIDO signature counter is
-  included in cryptographic verification (tampering causes verification
-  failure), but the server does not track `last_seen_counter` per key or
-  reject signatures where `counter <= last_seen_counter`.  This means cloned
-  tokens cannot be detected via counter regression.  OpenSSH's own `sshd` also
-  does not enforce this by default.  Counter values are exposed via the
-  `sk_fido_verify_fun` callback, so applications can implement their own
-  tracking if needed.
+- **Counter enforcement requires a callback** — the server does not track
+  `last_seen_counter` per key by default.  To detect cloned tokens via counter
+  regression, configure a `sk_fido_counter_fun` callback that implements
+  persistent counter tracking.  OpenSSH's own `sshd` also does not enforce
+  counter monotonicity by default.
 
 - **No attestation verification** — FIDO attestation certificates are not
   checked.  This is consistent with OpenSSH's behaviour.

@@ -1000,54 +1000,46 @@ supporting ext-info.
       | {password, string()}
       | {pwdfun, pwdfun_2() | pwdfun_4()}
       | {no_auth_needed, boolean()}
-      | {sk_fido_verify_fun, sk_fido_verify_fun()}.
+      | {sk_fido_counter_fun, sk_fido_counter_fun()}.
 
 -doc """
-Optional callback for FIDO/U2F security key policy verification.
+Optional callback for FIDO/U2F signature-counter monotonicity enforcement.
 
-After cryptographic verification of a FIDO signature succeeds, this
-callback is invoked with a map containing:
+User presence (UP — the authenticator touch flag) is enforced for FIDO
+security key signatures by default, matching OpenSSH's
+`PUBKEYAUTH_TOUCH_REQUIRED` policy.  The only way to relax this is by
+adding `no-touch-required` to the key's `authorized_keys` line — the
+same mechanism OpenSSH uses.  There is no programmatic override; the
+callback cannot change UP enforcement.
 
-- `flags` — the raw authenticator flags byte
-- `counter` — the 32-bit signature counter
-- `user_presence` — `true` if the User Presence (UP) flag is set
-- `user_verification` — `true` if the User Verified (UV) flag is set
+After cryptographic verification and UP enforcement succeed, this
+callback — if configured — is invoked so applications can track the
+FIDO signature counter per key and reject replayed or cloned tokens.
+The callback receives a map with:
+
+- `counter` — the 32-bit monotonic signature counter from the authenticator
+- `key` — the decoded public key that was used for authentication
 - `user` — the authenticating username (string)
 - `algorithm` — the negotiated algorithm atom
   (`'sk-ecdsa-sha2-nistp256@openssh.com'` or `'sk-ssh-ed25519@openssh.com'`)
-- `key` — the decoded public key that was used for authentication
-- `key_options` — per-key options from `authorized_keys` (list of strings,
-  e.g. `["no-touch-required"]`).  Empty list when the key line has no options
-  or when `is_auth_key/3` returned plain `true`.
 
-Return `ok` to allow authentication, or `{error, Reason}` to reject.
+Return `ok` to allow authentication, or `{error, Reason}` to reject it
+(e.g. when the counter is not strictly greater than the last-seen value
+for this key).
 
-**Default behaviour (when `undefined`):** User presence (UP, the
-authenticator touch flag) is required unless the key's `authorized_keys`
-line includes the `no-touch-required` option.  This matches OpenSSH's
-default `PUBKEYAUTH_TOUCH_REQUIRED` policy with per-key override.
-
-When a callback IS configured, it receives the full `key_options` list
-and can implement its own policy.  The `no-touch-required` option is
-NOT automatically honoured when a callback is present — the callback
-has full control.
-
-To **tighten** the policy (e.g. also require user verification / PIN),
-check the `user_verification` field and return `{error, Reason}` when
-it is `false`.
+**Default behaviour (when `undefined`):** No counter enforcement.
+Cryptographic verification and user presence are still checked, but
+the counter value is not tracked.  This matches OpenSSH's default
+behaviour — `sshd` also does not enforce counter monotonicity.
 """.
 -doc(#{group => <<"Daemon Options">>}).
--type sk_fido_verify_fun() :: fun((sk_fido_info()) -> ok | {error, term()}) | undefined.
+-type sk_fido_counter_fun() :: fun((sk_fido_counter_info()) -> ok | {error, term()}) | undefined.
 
 -doc(#{group => <<"Daemon Options">>}).
--type sk_fido_info() :: #{flags := non_neg_integer(),
-                          counter := non_neg_integer(),
-                          user_presence := boolean(),
-                          user_verification := boolean(),
-                          user := string(),
-                          algorithm := atom(),
-                          key := public_key:public_key(),
-                          key_options := [string()]}.
+-type sk_fido_counter_info() :: #{counter := non_neg_integer(),
+                                  key := public_key:public_key(),
+                                  user := string(),
+                                  algorithm := atom()}.
 
 -doc(#{group => <<"Daemon Options">>}).
 -type prompt_texts() ::
