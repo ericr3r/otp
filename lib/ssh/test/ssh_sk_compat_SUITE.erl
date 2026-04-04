@@ -64,8 +64,8 @@
          sk_login_ed25519_otp_is_server/1, sk_login_both_types_otp_is_server/1,
          sk_login_fido_callback_enforced/1, sk_login_fido_callback_rejects/1,
          sk_login_wrong_key_rejected/1, sk_login_password_fallback_from_sk/1,
-         sk_exec_after_sk_auth/1, sk_sftp_after_sk_auth/1, sk_counter_increases/1,
-         sk_flags_propagated/1]).
+         sk_login_no_presence_required/1, sk_default_up_enforcement/1, sk_exec_after_sk_auth/1,
+         sk_sftp_after_sk_auth/1, sk_counter_increases/1, sk_flags_propagated/1]).
 
 -define(DOCKER_PFX, "ssh_sk_compat_suite-sk").
 -define(DOCKER_IMAGE, "ssh_sk_compat_suite").
@@ -95,6 +95,8 @@ groups() ->
        sk_login_both_types_otp_is_server,
        sk_login_fido_callback_enforced,
        sk_login_fido_callback_rejects,
+       sk_login_no_presence_required,
+       sk_default_up_enforcement,
        sk_login_wrong_key_rejected,
        sk_login_password_fallback_from_sk]},
      {sk_advanced,
@@ -389,6 +391,113 @@ sk_login_fido_callback_rejects(Config) ->
             {error, _Reason} ->
                 %% Connection refused/timeout = rejection worked
                 ok
+        end
+    after
+        catch ssh:stop_daemon(Server)
+    end.
+
+%%--------------------------------------------------------------------
+%% @doc Verify that user presence enforcement can be relaxed via callback.
+%% This is the Tier 3 equivalent of the "no-touch-required" OpenSSH
+%% authorized_keys option.  The callback unconditionally returns `ok',
+%% accepting the signature regardless of the UP flag value.
+%%
+%% Since sk-dummy.so always sets UP=1, the auth succeeds.  The key point
+%% is that the *permissive* callback is invoked, receives correct data,
+%% and its `ok' return is honoured even though the callback does NOT
+%% inspect the user_presence field.
+sk_login_no_presence_required(Config) ->
+    {KeyPrivPath, PubKeyBin} = generate_sk_key_in_docker(Config, "ed25519-sk"),
+    Parent = self(),
+    Ref = make_ref(),
+    %% Permissive callback — equivalent to no-touch-required.
+    %% Accepts any valid signature regardless of UP/UV flags.
+    NoTouchFun =
+        fun(FidoInfo) ->
+           Parent ! {no_touch_cb, Ref, FidoInfo},
+           ok
+        end,
+    {Server, Host, HostPort, _SysDir, _UsrDir} =
+        setup_otp_server_for_sk(Config, PubKeyBin, [{sk_fido_verify_fun, NoTouchFun}]),
+    try
+        HostStr = host_ip_for_docker(Host),
+        SshCmd = sk_ssh_cmd(KeyPrivPath, HostPort, HostStr, "io:format(\"NO_TOUCH_OK~n\")."),
+        case exec_in_docker(Config, SshCmd) of
+            {ok, {0, Output}} ->
+                case binary:match(iolist_to_binary(Output), <<"NO_TOUCH_OK">>) of
+                    nomatch ->
+                        ct:fail("Auth succeeded but unexpected output: ~s", [Output]);
+                    _ ->
+                        ok
+                end,
+                %% Verify the permissive callback was invoked with the right info
+                receive
+                    {no_touch_cb, Ref, FidoInfo} ->
+                        ct:log("no-touch-required callback received: ~p", [FidoInfo]),
+                        %% Must have all expected keys
+                        true = maps:is_key(flags, FidoInfo),
+                        true = maps:is_key(counter, FidoInfo),
+                        true = maps:is_key(user_presence, FidoInfo),
+                        true = maps:is_key(user_verification, FidoInfo),
+                        true = maps:is_key(user, FidoInfo),
+                        true = maps:is_key(algorithm, FidoInfo),
+                        %% sk-dummy.so sets UP=true; callback accepted without checking
+                        true = maps:get(user_presence, FidoInfo),
+                        ?USER = maps:get(user, FidoInfo),
+                        'sk-ssh-ed25519@openssh.com' = maps:get(algorithm, FidoInfo),
+                        ct:log("Tier 3: no-touch-required callback accepted auth, UP=~p UV=~p "
+                               "counter=~p",
+                               [maps:get(user_presence, FidoInfo),
+                                maps:get(user_verification, FidoInfo),
+                                maps:get(counter, FidoInfo)]),
+                        ok
+                after 5000 ->
+                    ct:fail("Permissive FIDO callback was not invoked within 5 seconds")
+                end;
+            {ok, {ExitStatus, Output}} ->
+                ct:fail("SSH auth failed with permissive callback (exit ~p): ~s",
+                        [ExitStatus, Output]);
+            {error, Reason} ->
+                ct:fail("exec failed: ~p", [Reason])
+        end
+    after
+        catch ssh:stop_daemon(Server)
+    end.
+
+%%--------------------------------------------------------------------
+%% @doc Verify that the default UP enforcement (no callback configured)
+%% works end-to-end with a real OpenSSH client.
+%%
+%% When no `sk_fido_verify_fun' is configured, the server requires
+%% user presence (UP=1) by default — matching OpenSSH's
+%% PUBKEYAUTH_TOUCH_REQUIRED.  Since sk-dummy.so always sets UP=1,
+%% authentication should succeed under the default policy.
+%%
+%% This is the Tier 3 counterpart of the unit test
+%% `sk_fido_default_no_callback' in ssh_pubkey_SUITE which tests both
+%% UP=0 (reject) and UP=1 (accept) using synthetic signatures.
+%% Here we can only test UP=1 because sk-dummy.so always sets it.
+sk_default_up_enforcement(Config) ->
+    {KeyPrivPath, PubKeyBin} = generate_sk_key_in_docker(Config, "ecdsa-sk"),
+    %% No sk_fido_verify_fun — rely on the default UP enforcement
+    {Server, Host, HostPort, _SysDir, _UsrDir} = setup_otp_server_for_sk(Config, PubKeyBin),
+    try
+        HostStr = host_ip_for_docker(Host),
+        SshCmd = sk_ssh_cmd(KeyPrivPath, HostPort, HostStr, "io:format(\"DEFAULT_UP_OK~n\")."),
+        case exec_in_docker(Config, SshCmd) of
+            {ok, {0, Output}} ->
+                case binary:match(iolist_to_binary(Output), <<"DEFAULT_UP_OK">>) of
+                    nomatch ->
+                        ct:fail("Default UP enforcement: unexpected output: ~s", [Output]);
+                    _ ->
+                        ct:log("Tier 3: default UP enforcement accepted auth (sk-dummy.so sets "
+                               "UP=1, no callback configured)"),
+                        ok
+                end;
+            {ok, {ExitStatus, Output}} ->
+                ct:fail("Default UP enforcement failed (exit ~p): ~s", [ExitStatus, Output]);
+            {error, Reason} ->
+                ct:fail("exec failed: ~p", [Reason])
         end
     after
         catch ssh:stop_daemon(Server)
