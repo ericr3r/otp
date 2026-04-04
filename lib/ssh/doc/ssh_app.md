@@ -430,16 +430,44 @@ following keys:
 - `user_verification` — `true` if the User Verified (UV) flag is set
 - `user` — the username being authenticated (string)
 - `algorithm` — the negotiated algorithm atom
+- `key` — the decoded public key used for authentication
+- `key_options` — a list of option strings parsed from the key's
+  `authorized_keys` line (e.g., `["no-touch-required"]`).  When the key's
+  entry has no options, this is the empty list `[]`.
 
 The callback must return `ok` to allow authentication, or `{error, Reason}` to
 reject it.
 
-If `sk_fido_verify_fun` is not set (the default), user presence (UP — the
-authenticator touch flag) is **required**.  Signatures without the UP bit set
-are rejected, matching OpenSSH's default `PUBKEYAUTH_TOUCH_REQUIRED` policy.
+#### Default behaviour (no callback configured)
 
-Example — relax the user-presence requirement (equivalent to OpenSSH's
-`no-touch-required` authorized_keys option):
+If `sk_fido_verify_fun` is not set (the default), user presence (UP — the
+authenticator touch flag) is **required** — *unless* the key's `authorized_keys`
+line carries the `no-touch-required` option.  When `no-touch-required` is
+present for a key, signatures from that key are accepted even when the UP bit is
+not set.  This matches OpenSSH's per-key `no-touch-required` behaviour.
+
+In other words, with no callback you can have mixed policies in
+`authorized_keys`:
+
+```
+sk-ssh-ed25519@openssh.com AAAA... human-key
+no-touch-required sk-ssh-ed25519@openssh.com AAAA... headless-service-key
+```
+
+The first key (`human-key`) requires a physical touch on the authenticator.
+The second key (`headless-service-key`) allows authentication without a touch,
+which is useful for automated / headless service accounts.
+
+#### Custom callback behaviour
+
+When a callback IS configured via `sk_fido_verify_fun`, it receives the full
+info map — including `key_options` — and has full control over the
+authentication decision.  The default `no-touch-required` handling described
+above is *not* applied; the callback is responsible for implementing whatever
+per-key policy it needs using the `key_options` list.
+
+Example — relax the user-presence requirement globally (equivalent to
+OpenSSH's `no-touch-required` authorized_keys option):
 
 ```erlang
 ssh:daemon(2222,
@@ -447,6 +475,13 @@ ssh:daemon(2222,
             {sk_fido_verify_fun,
              fun(_) -> ok end}]).
 ```
+
+> #### Note {: .info }
+>
+> With the default per-key `no-touch-required` support described above, you
+> no longer need a blanket `fun(_) -> ok end` callback just to allow
+> touch-less keys.  Simply add `no-touch-required` to the relevant
+> `authorized_keys` entries and leave `sk_fido_verify_fun` unset.
 
 Example — tighten the policy to also require user verification (PIN or
 biometric):
@@ -457,6 +492,28 @@ ssh:daemon(2222,
             {sk_fido_verify_fun,
              fun(#{user_presence := true, user_verification := true}) -> ok;
                 (_) -> {error, verification_required}
+             end}]).
+```
+
+Example — honour per-key `no-touch-required` from `authorized_keys` inside a
+custom callback, while enforcing touch for all other keys:
+
+```erlang
+ssh:daemon(2222,
+           [{system_dir, "/etc/ssh"},
+            {sk_fido_verify_fun,
+             fun(#{key_options := Opts} = Info) ->
+                 case lists:member("no-touch-required", Opts) of
+                     true ->
+                         %% Key is marked no-touch-required — allow it
+                         ok;
+                     false ->
+                         %% Otherwise require user presence
+                         case Info of
+                             #{user_presence := true} -> ok;
+                             _ -> {error, touch_required}
+                         end
+                 end
              end}]).
 ```
 

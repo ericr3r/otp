@@ -475,8 +475,12 @@ Eshell V15.0  (abort with ^G)
 
 By default, the server requires user presence (UP — the authenticator touch
 flag) for all SK signatures, matching OpenSSH's `PUBKEYAUTH_TOUCH_REQUIRED`
-policy.  To enforce additional policy (for example, also requiring user
-verification via PIN or biometric), use the `sk_fido_verify_fun` daemon option:
+policy — unless the key's `authorized_keys` line includes the
+`no-touch-required` option, in which case user presence is automatically
+relaxed for that key without any callback needed.
+
+To enforce additional policy (for example, also requiring user verification
+via PIN or biometric), use the `sk_fido_verify_fun` daemon option:
 
 ```erlang
 {ok, Sshd} = ssh:daemon(8989,
@@ -489,9 +493,27 @@ verification via PIN or biometric), use the `sk_fido_verify_fun` daemon option:
                            end}]).
 ```
 
-The callback receives a map with keys `flags`, `counter`, `user_presence`,
-`user_verification`, `user`, and `algorithm`. See the
-[SSH Application](ssh_app.md) reference for details.
+The callback receives a map with the following keys:
+
+- `flags` — raw authenticator flags byte
+- `counter` — signature counter
+- `user_presence` — whether the UP flag was set
+- `user_verification` — whether the UV flag was set
+- `user` — the username being authenticated
+- `algorithm` — the public key algorithm (`ecdsa-sk` or `ed25519-sk`)
+- `key` — the public key used for authentication
+- `key_options` — per-key options from `authorized_keys` (e.g. `["no-touch-required"]`)
+
+See the [SSH Application](ssh_app.md) reference for details.
+
+> **Note:** When `no-touch-required` is set in `authorized_keys` for a given
+> key, the server honours it automatically (per-key) and skips the UP check
+> for that key.  No `sk_fido_verify_fun` callback is needed for this common
+> case — simply add the option to the `authorized_keys` line:
+>
+> ```
+> no-touch-required sk-ssh-ed25519@openssh.com AAAAGnN...== user@host
+> ```
 
 ## SFTP Server
 

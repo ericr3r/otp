@@ -268,9 +268,21 @@ handling plugin `m:ssh_file`. The alternatives are:
 
 When accepting FIDO/U2F security key authentication (`ecdsa-sk` or
 `ed25519-sk` keys from OpenSSH clients), the server **requires user presence
-(UP) by default** — signatures without the authenticator-touch flag set are
-rejected.  This matches OpenSSH's default `PUBKEYAUTH_TOUCH_REQUIRED` policy
-and prevents automated use of a key that was left plugged in.
+(UP) by default unless the key's authorized_keys line has
+`no-touch-required`** — signatures without the authenticator-touch flag set
+are rejected for keys that do not carry this option.  This matches OpenSSH's
+default `PUBKEYAUTH_TOUCH_REQUIRED` policy and prevents automated use of a
+key that was left plugged in.
+
+The `no-touch-required` option in `authorized_keys` is now honoured
+automatically on a per-key basis.  When a key's entry includes this option,
+the server skips the user-presence check for that key only — no callback is
+needed for this simple case.  Just add the option to the key's
+`authorized_keys` line:
+
+```
+no-touch-required sk-ecdsa-sha2-nistp256@openssh.com AAAAInN...== user@host
+```
 
 Additional policy can be applied via the `sk_fido_verify_fun` daemon option.
 This callback is invoked after cryptographic verification succeeds and receives
@@ -289,8 +301,10 @@ Common hardening and policy adjustments:
    end}
   ```
 
-- **Relax user presence** — equivalent to OpenSSH's `no-touch-required`
-  authorized_keys option.  Accept any valid SK signature regardless of flags:
+- **Relax user presence globally** — equivalent to applying `no-touch-required`
+  to every key via a callback.  Accept any valid SK signature regardless of
+  flags (note: for the simple per-key case, prefer adding `no-touch-required`
+  to the `authorized_keys` line instead of using a callback):
 
   ```erlang
   {sk_fido_verify_fun, fun(_) -> ok end}
