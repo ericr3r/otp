@@ -73,7 +73,7 @@ start_system(Address0, Options) ->
 
 %%%----------------------------------------------------------------
 stop_system(SysSup) when is_pid(SysSup) ->
-    gen_server:stop(SysSup).
+    supervisor:stop(SysSup).
 
 %%%----------------------------------------------------------------
 stop_listener(SystemSup) when is_pid(SystemSup) ->
