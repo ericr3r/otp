@@ -80,7 +80,7 @@
 suite() ->
     [{ct_hooks, [ts_install_cth]}, {timetrap, {seconds, 20}}].
 
-all() ->
+all() -> 
     [{group, old_format},
      {group, new_format},
      {group, option_space},
@@ -88,45 +88,46 @@ all() ->
      {group, ssh_public_key_decode_encode},
      {group, pkcs8},
      chk_known_hosts,
-     ec_private_key_version_compat].
+     ec_private_key_version_compat
+    ].
 
 -define(tests_old,
         [connect_rsa_sha2_to_rsa_sha2,
-         connect_rsa_sha1_to_dsa,
-         connect_rsa_sha2_to_dsa,
-         connect_rsa_sha2_to_ecdsa,
-         connect_dsa_to_rsa_sha2,
-         connect_dsa_to_dsa,
-         connect_dsa_to_ecdsa,
-         connect_ecdsa_to_rsa_sha2,
-         connect_ecdsa_to_dsa,
-         connect_ecdsa_to_ecdsa,
-         connect_dsa_to_ed25519,
-         connect_ecdsa_to_ed25519,
-         connect_rsa_sha2_to_ed25519,
-         connect_dsa_to_ed448,
-         connect_ecdsa_to_ed448,
+                    connect_rsa_sha1_to_dsa,
+                    connect_rsa_sha2_to_dsa,
+                    connect_rsa_sha2_to_ecdsa,
+                    connect_dsa_to_rsa_sha2,
+                    connect_dsa_to_dsa,
+                    connect_dsa_to_ecdsa,
+                    connect_ecdsa_to_rsa_sha2,
+                    connect_ecdsa_to_dsa,
+                    connect_ecdsa_to_ecdsa,
+                    connect_dsa_to_ed25519,
+                    connect_ecdsa_to_ed25519,
+                    connect_rsa_sha2_to_ed25519,
+                    connect_dsa_to_ed448,
+                    connect_ecdsa_to_ed448,
          connect_rsa_sha2_to_ed448]).
 -define(tests_new,
         [connect_ed25519_to_dsa,
-         connect_ed25519_to_ecdsa,
-         connect_ed25519_to_ed448,
-         connect_ed25519_to_ed25519,
-         connect_ed25519_to_rsa_sha2,
-         connect_ed448_to_dsa,
-         connect_ed448_to_ecdsa,
-         connect_ed448_to_ed25519,
-         connect_ed448_to_ed448,
-         connect_ed448_to_rsa_sha2
+                    connect_ed25519_to_ecdsa,
+                    connect_ed25519_to_ed448,
+                    connect_ed25519_to_ed25519,
+                    connect_ed25519_to_rsa_sha2,
+                    connect_ed448_to_dsa,
+                    connect_ed448_to_ecdsa,
+                    connect_ed448_to_ed25519,
+                    connect_ed448_to_ed448,
+                    connect_ed448_to_rsa_sha2
          | ?tests_old]). % but taken from the new format directory
 
 groups() ->
-    [{new_format, [], ?tests_new},
+    [{new_format,  [], ?tests_new},
      {old_format,
       [],
       [check_dsa_disabled, check_rsa_sha1_disabled | ?tests_old ++ [{group, passphrase}]]},
-     {passphrase, [], ?tests_old},
-     {option_space, [], [{group, new_format}]},
+     {passphrase,  [], ?tests_old},
+     {option_space,[], [{group,new_format}]},
      {pkcs8, [], [ssh_hostkey_pkcs8]},
      {ssh_hostkey_fingerprint,
       [],
@@ -165,9 +166,9 @@ groups() ->
 %%%----------------------------------------------------------------
 init_per_suite(Config) ->
     ?CHECK_CRYPTO(begin
-                      ssh:start(),
+	   ssh:start(),
                       [{client_opts, []}, {daemon_opts, []} | Config]
-                  end).
+       end).
 
 end_per_suite(_onfig) ->
     ssh:stop().
@@ -186,7 +187,7 @@ init_per_group(pkcs8, Config) ->
               proplists:get_value(data_dir, Config), "pkcs8"),
     [{fmt, pkcs8}, {key_src_dir, Dir} | Config];
 init_per_group(option_space, Config) ->
-    extend_optsL([client_opts, daemon_opts],
+    extend_optsL([client_opts,daemon_opts],
                  [{key_cb, {ssh_file, [{optimize, space}]}}],
                  Config);
 init_per_group(passphrase, Config0) ->
@@ -213,8 +214,8 @@ extend_optsL(OptName, Values, Config) when is_atom(OptName) ->
     Opts = proplists:get_value(OptName, Config),
     replace_opt(OptName, Values ++ Opts, Config).
 
-replace_opt(OptName, Value, Config) ->
-    lists:keyreplace(OptName, 1, Config, {OptName, Value}).
+replace_opt(OptName, Value, Config) ->      
+    lists:keyreplace(OptName, 1, Config, {OptName,Value}).
 
 end_per_group(_, Config) ->
     Config.
@@ -290,8 +291,8 @@ init_per_testcase(ssh_hostkey_fingerprint_sha384, Config) ->
     init_fingerprint_testcase([sha384], Config);
 init_per_testcase(ssh_hostkey_fingerprint_sha512, Config) ->
     init_fingerprint_testcase([sha512], Config);
-init_per_testcase(ssh_hostkey_fingerprint_list, Config) ->
-    init_fingerprint_testcase([sha, md5], Config);
+init_per_testcase(ssh_hostkey_fingerprint_list  , Config) ->
+    init_fingerprint_testcase([sha,md5], Config);
 init_per_testcase(_, Config) ->
     Config.
 
@@ -307,7 +308,7 @@ init_fingerprint_testcase(Algs, Config0) ->
             Dog = ct:timetrap(?TIMEOUT),
             [{watchdog, Dog} | Config];
         UnsupportedAlgs ->
-            {skip, {UnsupportedAlgs, not_supported}}
+            {skip,{UnsupportedAlgs,not_supported}}
     end.
 
 %%%----------------------------------------------------------------
@@ -323,7 +324,7 @@ connect_rsa_sha2_to_dsa(Config) ->
     try_connect(Config).
 
 connect_rsa_sha2_to_ecdsa(Config) ->
-    try_connect(Config).
+    try_connect(Config). 
 
 connect_rsa_sha2_to_ed25519(Config) ->
     try_connect(Config).
@@ -338,7 +339,7 @@ connect_dsa_to_dsa(Config) ->
     try_connect(Config).
 
 connect_dsa_to_ecdsa(Config) ->
-    try_connect(Config).
+    try_connect(Config). 
 
 connect_dsa_to_ed25519(Config) ->
     try_connect(Config).
@@ -347,10 +348,10 @@ connect_dsa_to_ed448(Config) ->
     try_connect(Config).
 
 connect_ecdsa_to_rsa_sha2(Config) ->
-    try_connect(Config).
+    try_connect(Config). 
 
 connect_ecdsa_to_dsa(Config) ->
-    try_connect(Config).
+    try_connect(Config). 
 
 connect_ecdsa_to_ecdsa(Config) ->
     try_connect(Config).
@@ -394,7 +395,7 @@ connect_ed448_to_ed448(Config) ->
 %%%----------------------------------------------------------------
 check_dsa_disabled(Config) ->
     try_connect_disabled(Config).
-
+            
 check_rsa_sha1_disabled(Config) ->
     try_connect_disabled(Config).
 
@@ -455,8 +456,8 @@ ssh_hostkey_fingerprint_sha512(_Config) ->
 ssh_hostkey_fingerprint_list(_Config) ->
     Expected =
         ["SHA1:Soammnaqg06jrm2jivMSnzQGlmk",
-         "MD5:4b:0b:63:de:0f:a7:3a:ab:2c:cc:2d:d1:21:37:1d:3a"],
-    Expected = ssh:hostkey_fingerprint([sha, md5], ssh_hostkey(rsa)).
+                "MD5:4b:0b:63:de:0f:a7:3a:ab:2c:cc:2d:d1:21:37:1d:3a"],
+    Expected = ssh:hostkey_fingerprint([sha,md5], ssh_hostkey(rsa)).
 
 %%--------------------------------------------------------------------
 ssh_rsa_public_key(Config) when is_list(Config) ->
@@ -519,7 +520,7 @@ ssh_ecdsa_public_key(Config) when is_list(Config) ->
         file:read_file(
             filename:join(Datadir, "openssh_ecdsa_pub")),
     [{PubKey, Attributes2}] = ssh_file:decode(ECDSARawOpenSsh, public_key),
-    [{PubKey, Attributes2}] = ssh_file:decode(ECDSARawOpenSsh, openssh_key),
+    [{PubKey, Attributes2}] =ssh_file:decode(ECDSARawOpenSsh, openssh_key),
 
     %% Can not check EncodedSSh == ECDSARawSsh2 and EncodedOpenSsh
     %% = ECDSARawOpenSsh as line breakpoints may differ
@@ -539,7 +540,7 @@ ssh_list_public_key(Config) when is_list(Config) ->
                                    "ssh2_rsa_comment_pub",
                                    "ssh2_dsa_pub",
                                    "ssh2_dsa_comment_pub",
-                                   "ssh2_ecdsa_pub",
+                                   "ssh2_ecdsa_pub", 
                                    "ssh2_subject_pub"]),
     {Data_openssh, Expect_openssh} =
         collect_binaries_expected(DataDir,
@@ -558,7 +559,7 @@ chk_encode(Data, Type) ->
     case ssh_file:decode(
              ssh_file:encode(Data, Type), Type)
     of
-        Data ->
+        Data->
             ct:log("re-encode ~p ok", [Type]),
             true;
         Result ->
@@ -577,8 +578,8 @@ chk_decode(Data, Expect, Type) ->
                     BadResult,
                     Expect,
                     if is_list(BadResult) ->
-                           lists:foldr(fun ({Key, Attrs}, Acc) ->
-                                               case Key of
+                            lists:foldr(fun({Key,Attrs}, Acc) ->
+                                                case Key of
                                                    #'RSAPublicKey'{} when is_list(Attrs) ->
                                                        Acc;
                                                    {_, #'Dss-Parms'{}} when is_list(Attrs) ->
@@ -590,14 +591,14 @@ chk_decode(Data, Expect, Type) ->
                                                        [{bad_key, {Key, Attrs}} | Acc];
                                                    _ ->
                                                        [{bad_attrs, {Key, Attrs}} | Acc]
-                                               end;
-                                           (Other, Acc) ->
-                                               [{other, Other} | Acc]
+                                                end;
+                                           (Other,Acc) ->
+                                                [{other,Other}|Acc]
                                        end,
                                        [],
                                        BadResult);
-                       true ->
-                           '???'
+                        true ->
+                            '???'
                     end]),
             false
     end.
@@ -609,8 +610,8 @@ collect_binaries_expected(Dir, Type, Files) ->
             {ok, B}
                 <- [file:read_file(
                         filename:join(Dir, F))]],
-    {list_to_binary(lists:join("\n", Bins0)),
-     lists:flatten([ssh_file:decode(B, Type) || B <- Bins0])}.
+    {list_to_binary( lists:join("\n", Bins0)),
+     lists:flatten([ssh_file:decode(B,Type) || B <- Bins0])}.
 
 %%--------------------------------------------------------------------
 ssh_rfc4716_rsa_comment(Config) when is_list(Config) ->
@@ -644,7 +645,7 @@ ssh_rfc4716_dsa_comment(Config) when is_list(Config) ->
     true = Value =/= undefined,
 
     %% Can not check Encoded == DSARawSsh2 as line continuation breakpoints may differ
-    Encoded = ssh_file:encode([{PubKey, Attributes}], rfc4716_key),
+    Encoded  = ssh_file:encode([{PubKey, Attributes}], rfc4716_key),
     [{PubKey, Attributes}] = ssh_file:decode(Encoded, public_key).
 
 %%--------------------------------------------------------------------
@@ -662,7 +663,7 @@ ssh_rfc4716_rsa_subject(Config) when is_list(Config) ->
     true = Value =/= undefined,
 
     %% Can not check Encoded == RSARawSsh2 as line continuation breakpoints may differ
-    Encoded = ssh_file:encode([{PubKey, Attributes}], rfc4716_key),
+    Encoded  = ssh_file:encode([{PubKey, Attributes}], rfc4716_key),
     [{PubKey, Attributes}] = ssh_file:decode(Encoded, public_key).
 
 %%--------------------------------------------------------------------
@@ -682,11 +683,11 @@ ssh_known_hosts(Config) when is_list(Config) ->
     Comment2 = "foo@bar.com",
     Comment3 = "Comment with whitespaces",
     Comment4 = "foo@bar.com Comment with whitespaces",
-
+    	
     Comment1 = proplists:get_value(comment, Attributes1, undefined),
     Comment2 = proplists:get_value(comment, Attributes2),
     Comment3 = proplists:get_value(comment, Attributes3),
-    Comment4 = proplists:get_value(comment, Attributes4),
+    Comment4 = proplists:get_value(comment, Attributes4),	
 
     Value1 = proplists:get_value(hostnames, Attributes1, undefined),
     Value2 = proplists:get_value(hostnames, Attributes2, undefined),
@@ -711,7 +712,7 @@ ssh1_known_hosts(Config) when is_list(Config) ->
     Value2 = proplists:get_value(hostnames, Attributes2, undefined),
     true = Value1 =/= undefined andalso Value2 =/= undefined,
 
-    Comment = "dhopson@VMUbuntu-DSH comment with whitespaces",
+    Comment ="dhopson@VMUbuntu-DSH comment with whitespaces",
     Comment = proplists:get_value(comment, Attributes3),
 
     Encoded = ssh_file:encode(Decoded, known_hosts),
@@ -734,8 +735,8 @@ ssh_auth_keys(Config) when is_list(Config) ->
     true = Value1 =/= undefined,
 
     Comment1 = Comment2 = "dhopson@VMUbuntu-DSH",
-    Comment3 = Comment4 = "dhopson@VMUbuntu-DSH comment with whitespaces",
-
+    Comment3 = Comment4 ="dhopson@VMUbuntu-DSH comment with whitespaces",
+    
     Comment1 = proplists:get_value(comment, Attributes1),
     Comment2 = proplists:get_value(comment, Attributes2),
     Comment3 = proplists:get_value(comment, Attributes3),
@@ -763,8 +764,8 @@ ssh1_auth_keys(Config) when is_list(Config) ->
     true = Value1 =/= undefined andalso Value2 =/= undefined,
 
     Comment2 = Comment3 = "dhopson@VMUbuntu-DSH",
-    Comment4 = Comment5 = "dhopson@VMUbuntu-DSH comment with whitespaces",
-
+    Comment4 = Comment5 ="dhopson@VMUbuntu-DSH comment with whitespaces",
+    
     undefined = proplists:get_value(comment, Attributes1, undefined),
     Comment2 = proplists:get_value(comment, Attributes2),
     Comment3 = proplists:get_value(comment, Attributes3),
@@ -2764,14 +2765,14 @@ ec_private_key_version_compat(Config) when is_list(Config) ->
 %%%----------------------------------------------------------------
 %% Should use stored keys instead
 ssh_hostkey(rsa) ->
-    [{PKdecoded, _}] =
+    [{PKdecoded,_}] =
         ssh_file:decode(<<"ssh-rsa AAAAB3NzaC1yc2EAAAADAQABAAABAQDYXcYmsyJBstl4EfFYzfQJmSiUE162"
                           "zvSGSoMYybShYOI6rnnyvvihfw8Aml+2gZ716F2tqG48FQ/yPZEGWNPMrCejPpJctaPW"
                           "hpNdNMJ8KFXSEgr5bY2mEpa19DHmuDeXKzeJJ+X7s3fVdYc4FMk5731KIW6Huf019ZnT"
                           "xbx0VKG6b1KAJBg3vpNsDxEMwQ4LFMB0JHVklOTzbxmpaeULuIxvl65A+eGeFVeo2Q+Y"
                           "I9UnwY1vSgmc9Azwy8Ie9Z0HpQBN5I7Uc5xnknT8V6xDhgNfXEfzsgsRdDfZLECt1WO/"
                           "1gP9wkosvAGZWt5oG8pbNQWiQdFq536ck8WQD9WD none@example.org">>,
-                        public_key),
+	  public_key),
     PKdecoded.
 
 %%%----------------------------------------------------------------
@@ -2792,21 +2793,21 @@ chk_known_hosts(Config) ->
 
     UserOpts =
         [{user_dir, UsrDir},
-         {user, "foo"},
-         {password, "bar"},
-         {silently_accept_hosts, true},
+                {user, "foo"},
+                {password, "bar"},
+                {silently_accept_hosts, true},
          {user_interaction, false}],
 
     {_Pid1, Host1, Port1} = ssh_test_lib:daemon(DaemonOpts),
     {_Pid2, Host2, Port2} = ssh_test_lib:daemon(DaemonOpts),
 
     _C1 = ssh_test_lib:connect(Host1, Port1, UserOpts),
-    {ok, KnownHosts1} = file:read_file(KnownHostsFile),
+    {ok,KnownHosts1} = file:read_file(KnownHostsFile),
     Sz1 = byte_size(KnownHosts1),
     ct:log("~p bytes KnownHosts1 = ~p", [Sz1, KnownHosts1]),
 
     _C2 = ssh_test_lib:connect(Host2, Port2, UserOpts),
-    {ok, KnownHosts2} = file:read_file(KnownHostsFile),
+    {ok,KnownHosts2} = file:read_file(KnownHostsFile),
     Sz2 = byte_size(KnownHosts2),
     ct:log("~p bytes KnownHosts2 = ~p", [Sz2, KnownHosts2]),
 
@@ -2824,11 +2825,11 @@ chk_known_hosts(Config) ->
                     binary_to_list(KnownHosts2)),
 
     %% Check that at least one NL terminates both two lines:
-    <<_:(Sz1 - 1)/binary, $\n, _:(Sz2 - Sz1 - 1)/binary, $\n>> = KnownHosts2.
+    <<_:(Sz1-1)/binary, $\n, _:(Sz2-Sz1-1)/binary, $\n>> = KnownHosts2.
 
 %%%----------------------------------------------------------------
-try_connect({skip, Reason}) ->
-    {skip, Reason};
+try_connect({skip,Reason}) ->
+    {skip,Reason};
 try_connect(Config) ->
     SystemDir = proplists:get_value(system_dir, Config),
     UserDir = proplists:get_value(user_dir, Config),
@@ -2843,9 +2844,9 @@ try_connect(Config) ->
     C = ssh_test_lib:connect(Host,
                              Port,
                              [{user_dir, UserDir},
-                              {silently_accept_hosts, true},
-                              {user_interaction, false}
-                              | ClientOpts]),
+                                          {silently_accept_hosts, true},
+                                          {user_interaction, false}
+                                          | ClientOpts]),
     ssh:close(C),
     ssh_dbg:stop(),
     ssh:stop_daemon(Pid).
@@ -2866,7 +2867,7 @@ setup_user_system_dir(ClientAlg, ServerAlg, Config) ->
     case supported(public_key, ClientAlg) andalso supported(public_key, ServerAlg) of
         true ->
             try setup_dirs(ClientAlg, ServerAlg, Config) of
-                {ok, {SystemDir, UserDir}} ->
+                {ok, {SystemDir,UserDir}} ->
                     ModAlgs =
                         [{preferred_algorithms,
                           [{public_key, lists:usort([alg(ClientAlg), alg(ServerAlg)])}]}],
@@ -2875,8 +2876,8 @@ setup_user_system_dir(ClientAlg, ServerAlg, Config) ->
                                                                                  ModAlgs,
                                                                                  Config)]
             catch
-                error:{badmatch, {error, enoent}}:S ->
-                    ct:log("~p:~p Stack:~n~p", [?MODULE, ?LINE, S]),
+                error:{badmatch,{error,enoent}}:S ->
+                    ct:log("~p:~p Stack:~n~p", [?MODULE,?LINE,S]),
                     {skip, no_key_file_found}
             end;
         false ->
@@ -2892,18 +2893,18 @@ setup_default_user_system_dir(ClientAlg, Config) ->
                     case supported(public_key, ServerAlg) of
                         true ->
                             try setup_dirs(ClientAlg, ServerAlg, Config) of
-                                {ok, {SystemDir, UserDir}} ->
+                                {ok, {SystemDir,UserDir}} ->
                                     ModAlgs =
                                         [{modify_algorithms,
-                                          [{append, [{public_key, [alg(ServerAlg)]}]},
+                                                [{append,[{public_key,[alg(ServerAlg)]}]},
                                            {rm,
                                             [{public_key,
                                               [alg(ClientAlg) | inv_algs(ClientAlg)]}]}]}],
                                     [{system_dir, SystemDir}, {user_dir, UserDir}
-                                     | extend_optsL([daemon_opts, client_opts], ModAlgs, Config)]
+                                     | extend_optsL([daemon_opts,client_opts], ModAlgs, Config)]
                             catch
-                                error:{badmatch, {error, enoent}}:S ->
-                                    ct:log("~p:~p Stack:~n~p", [?MODULE, ?LINE, S]),
+                                error:{badmatch,{error,enoent}}:S ->
+                                    ct:log("~p:~p Stack:~n~p", [?MODULE,?LINE,S]),
                                     {skip, no_key_file_found}
                             end;
                         false ->
@@ -2915,7 +2916,8 @@ setup_default_user_system_dir(ClientAlg, Config) ->
         true ->
             {fail, disabled_algorithm_present}
     end.
-
+            
+            
 setup_dirs(ClientAlg, ServerAlg, Config) ->
     PrivDir = proplists:get_value(priv_dir, Config),
     KeySrcDir = proplists:get_value(key_src_dir, Config),
@@ -2925,28 +2927,28 @@ setup_dirs(ClientAlg, ServerAlg, Config) ->
     SystemDir = filename:join(PrivDir, System),
     file:make_dir(SystemDir),
 
-    User = lists:concat(["user_", ClientAlg, "_", ServerAlg, "_", Fmt]),
-    UserDir = filename:join(PrivDir, User),
+    User   = lists:concat(["user_", ClientAlg, "_", ServerAlg, "_", Fmt]),
+    UserDir   = filename:join(PrivDir, User),
     file:make_dir(UserDir),
 
-    HostSrcFile = filename:join(KeySrcDir, file(src, host, ServerAlg)),
-    HostDstFile = filename:join(SystemDir, file(dst, host, ServerAlg)),
+    HostSrcFile = filename:join(KeySrcDir, file(src,host,ServerAlg)),
+    HostDstFile = filename:join(SystemDir, file(dst,host,ServerAlg)),
 
-    UserSrcFile = filename:join(KeySrcDir, file(src, user, ClientAlg)),
-    UserDstFile = filename:join(UserDir, file(dst, user, ClientAlg)),
+    UserSrcFile = filename:join(KeySrcDir, file(src,user,ClientAlg)),
+    UserDstFile = filename:join(UserDir, file(dst,user,ClientAlg)),
 
-    UserPubSrcFile = filename:join(KeySrcDir, file(src, user, ClientAlg) ++ ".pub"),
+    UserPubSrcFile = filename:join(KeySrcDir, file(src,user,ClientAlg)++".pub"),
     AuthorizedKeys = filename:join(UserDir, "authorized_keys"),
 
     ct:log("UserSrcFile = ~p~nUserDstFile = ~p", [UserSrcFile, UserDstFile]),
-    {ok, _} = file:copy(UserSrcFile, UserDstFile),
+    {ok,_} = file:copy(UserSrcFile, UserDstFile),
     ct:log("UserPubSrcFile = ~p~nAuthorizedKeys = ~p", [UserPubSrcFile, AuthorizedKeys]),
-    {ok, _} = file:copy(UserPubSrcFile, AuthorizedKeys),
+    {ok,_} = file:copy(UserPubSrcFile, AuthorizedKeys),
     ct:log("HostSrcFile = ~p~nHostDstFile = ~p", [HostSrcFile, HostDstFile]),
-    {ok, _} = file:copy(HostSrcFile, HostDstFile),
-
-    ct:log("SystemDir = ~p~nUserDir = ~p", [SystemDir, UserDir]),
-    {ok, {SystemDir, UserDir}}.
+    {ok,_} = file:copy(HostSrcFile, HostDstFile),
+    
+    ct:log("SystemDir = ~p~nUserDir = ~p", [SystemDir,UserDir]),
+    {ok, {SystemDir,UserDir}}.
 
 %%%----------------------------------------------------------------
 file(_, host, dsa) ->
@@ -3016,12 +3018,12 @@ default(Type, Alg) ->
 
 supported(Type, Alg) ->
     listed(algs(Alg),
-           try
-               ssh_transport:supported_algorithms(Type)
-           catch
+                               try
+                                   ssh_transport:supported_algorithms(Type)
+                               catch
                error:function_clause ->
                    crypto:supports(Type)
-           end).
+                               end).
 
 listed(As, L) ->
     lists:any(fun(A) -> lists:member(A, L) end, As).

@@ -973,7 +973,7 @@ connection out of a [server](`daemon/2`). Disabled per default.
 Enables (`true`) or disables (`false`) the possibility to tunnel a TCP/IP
 connection in to a [server](`daemon/2`). Disabled per default.
 
-Set `Callback` function to allow/deny/log tunnel connections.
+Set `Callback` function to allow/deny/log tunnel connections. 
 """.
 -doc(#{group => <<"Daemon Options">>}).
 -type tcpip_tunnel_in_daemon_option() :: {tcpip_tunnel_in, boolean() | Callback::fun((HostName::string(), inet:port_number()) -> boolean() | denied)} .
@@ -996,7 +996,7 @@ supporting ext-info.
         ssh_file:system_dir_daemon_option()
       | {auth_method_kb_interactive_data, prompt_texts() }
       | {user_passwords, [{UserName::string(),Pwd::string()}]}
-      | {pk_check_user, boolean()}
+      | {pk_check_user, boolean()}  
       | {password, string()}
       | {pwdfun, pwdfun_2() | pwdfun_4()}
       | {no_auth_needed, boolean()}
@@ -1330,8 +1330,8 @@ Experimental options that should not to be used in products.
 -record(ssh,
 	{
 	  role :: role(),
-	  peer :: undefined |
-                  {inet:hostname(),ip_port()},         %% string version of peer address
+	  peer :: undefined | 
+                  {inet:hostname(),ip_port()},         %% string version of peer address 
 
           local,        %% Local sockname. Need this AFTER a socket is closed by i.e. a crash
 
@@ -1352,7 +1352,7 @@ Experimental options that should not to be used in products.
           ignore_initial_kex_message = false, %% RFC 4253 section 7, if true peer's guess was wrong
 
 	  algorithms,   %% #alg{}
-
+	  
 	  send_mac = none, %% send MAC algorithm
 	  send_mac_key,  %% key used in send MAC algorithm
 	  send_mac_size = 0,
@@ -1371,7 +1371,7 @@ Experimental options that should not to be used in products.
           decrypt_cipher,       %% cipher. could be different from the algorithm
 	  decrypt_keys,         %% decrypt keys
 	  decrypt_block_size = 8,
-	  decrypt_ctx,          %% Decryption context
+	  decrypt_ctx,          %% Decryption context   
 
 	  compress = none,
 	  compress_ctx,
@@ -1387,14 +1387,14 @@ Experimental options that should not to be used in products.
 	  shared_secret,        %% K from key exchange
 	  exchanged_hash,       %% H from key exchange
 	  session_id,           %% same as FIRST exchanged_hash
-
+	  
 	  opts = [],
 	  send_sequence = 0,
 	  recv_sequence = 0,
 	  keyex_key,
 	  keyex_info,
 	  random_length_padding = ?MAX_RND_PADDING_LEN, % From RFC 4253 section 6.
-
+	  
 	  %% User auth
 	  user,
 	  service,
