@@ -1,0 +1,6 @@
+# SPDX-License-Identifier: BSD-2-Clause
+# SPDX-FileCopyrightText: Copyright (c) 1995 Tatu Ylonen <ylo@cs.hut.fi>, Espoo, Finland
+# SPDX-FileCopyrightText: Copyright (c) OpenBSD project members
+#
+# From OpenSSH regress/unittests/sshkey/testdata/ecdsa_sk1.pub
+# https://github.com/openssh/openssh-portable

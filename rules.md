@@ -608,7 +608,14 @@ Integration/mixed tests:
 
 ---
 
-### Task 6.3: Tier 3 — `sk-dummy.so` Integration Tests (optional, gated)
+### Task 6.3: Tier 3 — `sk-dummy.so` Integration Tests — NOT PLANNED
+
+> **Status: Not planned.**  `sk-dummy.so` is not packaged by any Linux
+> distribution or Nix and must be compiled from the OpenSSH source tree with
+> non-trivial build adaptations (BSD make, internal headers, version-coupled
+> `SSH_SK_VERSION_MAJOR`).  Without a readily available `sk-dummy.so` binary
+> the end-to-end tests cannot run.  This task is deferred until Milestone 8
+> (Docker image) makes `sk-dummy.so` available in a reproducible way.
 
 OpenSSH ships `sk-dummy.so` — a software FIDO token used by their own CI
 (`regress/misc/sk-dummy/`).  It implements the `sk-api.h` interface without

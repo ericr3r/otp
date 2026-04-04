@@ -1,0 +1,20 @@
+// %CopyrightBegin%
+//
+// SPDX-License-Identifier: Apache-2.0
+//
+// Copyright Ericsson AB 2025. All Rights Reserved.
+//
+// %CopyrightEnd%
+[{
+  "ID": "ssh-test-openssh-sk-fixtures",
+  "description": "FIDO/U2F security key test fixtures from OpenSSH regression tests",
+  "copyrightText": "Copyright (c) 1995 Tatu Ylonen <ylo@cs.hut.fi>, Espoo, Finland. Copyright (c) OpenBSD project members.",
+  "downloadLocation": "https://github.com/openssh/openssh-portable/tree/master/regress/unittests/sshkey/testdata",
+  "homepage": "https://www.openssh.com",
+  "licenseDeclared": "BSD-2-Clause",
+  "name": "openssh-sk-test-fixtures",
+  "versionInfo": "4168c905943f7f715182180b9f7c8cda54af2514",
+  "path": "./lib/ssh/test/ssh_pubkey_SUITE_data/sk_fixtures",
+  "supplier": "Organization: OpenBSD Project",
+  "purl": "pkg:github/openssh/openssh-portable"
+}]

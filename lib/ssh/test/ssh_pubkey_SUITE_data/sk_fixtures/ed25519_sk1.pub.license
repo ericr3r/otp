@@ -1,0 +1,6 @@
+# SPDX-License-Identifier: BSD-2-Clause
+# Copyright (c) 1995 Tatu Ylonen <ylo@cs.hut.fi>, Espoo, Finland
+# Copyright (c) OpenBSD project members
+#
+# Source: OpenSSH regress/unittests/sshkey/testdata/ed25519_sk1.pub
+# https://github.com/openssh/openssh-portable
