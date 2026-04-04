@@ -463,10 +463,9 @@ signatures where `counter <= last_seen_counter`.
 #### Custom callback behaviour
 
 When a callback is configured via `sk_fido_counter_fun`, it is invoked after
-cryptographic verification succeeds (and after UP enforcement, unless the key
-is marked `no-touch-required`).  The callback's sole purpose is to implement
-persistent counter tracking to detect cloned authenticator tokens — it
-**cannot** change user presence policy.
+cryptographic verification succeeds (regardless of the UP outcome).  The
+callback's sole purpose is to implement persistent counter tracking to detect
+cloned authenticator tokens — it **cannot** change user presence policy.
 
 Example — enforce counter monotonicity using an ETS table:
 

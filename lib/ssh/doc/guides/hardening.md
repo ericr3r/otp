@@ -284,8 +284,8 @@ no-touch-required sk-ssh-ed25519@openssh.com AAAA... headless-service-key
 
 The `sk_fido_counter_fun` daemon callback **cannot** override or change the
 UP policy — it is purely for **signature counter monotonicity** enforcement.
-The callback is invoked after cryptographic verification and UP enforcement
-have both succeeded, and receives a map with the following keys:
+The callback is invoked after cryptographic verification succeeds
+(regardless of the UP outcome), and receives a map with the following keys:
 
 - `counter` — the 32-bit signature counter from the authenticator
 - `key` — the decoded public key used for authentication

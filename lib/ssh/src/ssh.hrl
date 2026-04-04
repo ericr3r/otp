@@ -1012,7 +1012,7 @@ adding `no-touch-required` to the key's `authorized_keys` line — the
 same mechanism OpenSSH uses.  There is no programmatic override; the
 callback cannot change UP enforcement.
 
-After cryptographic verification and UP enforcement succeed, this
+After cryptographic verification succeeds, this
 callback — if configured — is invoked so applications can track the
 FIDO signature counter per key and reject replayed or cloned tokens.
 The callback receives a map with:
