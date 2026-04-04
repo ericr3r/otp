@@ -473,16 +473,19 @@ Eshell V15.0  (abort with ^G)
 
 ### Custom FIDO Verification
 
-To enforce additional policy (for example, requiring user presence), use the
-`sk_fido_verify_fun` daemon option:
+By default, the server requires user presence (UP — the authenticator touch
+flag) for all SK signatures, matching OpenSSH's `PUBKEYAUTH_TOUCH_REQUIRED`
+policy.  To enforce additional policy (for example, also requiring user
+verification via PIN or biometric), use the `sk_fido_verify_fun` daemon option:
 
 ```erlang
 {ok, Sshd} = ssh:daemon(8989,
                          [{system_dir, "/tmp/ssh_daemon"},
                           {user_dir, "/tmp/otptest_user/.ssh"},
                           {sk_fido_verify_fun,
-                           fun(#{user_presence := true}) -> ok;
-                              (_) -> {error, no_user_presence}
+                           fun(#{user_presence := true,
+                                 user_verification := true}) -> ok;
+                              (_) -> {error, verification_required}
                            end}]).
 ```
 

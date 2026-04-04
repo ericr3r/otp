@@ -267,33 +267,33 @@ handling plugin `m:ssh_file`. The alternatives are:
 ## FIDO Security Key Verification Policy
 
 When accepting FIDO/U2F security key authentication (`ecdsa-sk` or
-`ed25519-sk` keys from OpenSSH clients), additional policy can be applied via
-the `sk_fido_verify_fun` daemon option. This callback is invoked after
-cryptographic verification succeeds and receives a map containing the
-authenticator flags, signature counter, user presence status, and other
-FIDO-specific fields.
+`ed25519-sk` keys from OpenSSH clients), the server **requires user presence
+(UP) by default** — signatures without the authenticator-touch flag set are
+rejected.  This matches OpenSSH's default `PUBKEYAUTH_TOUCH_REQUIRED` policy
+and prevents automated use of a key that was left plugged in.
 
-Common hardening policies:
+Additional policy can be applied via the `sk_fido_verify_fun` daemon option.
+This callback is invoked after cryptographic verification succeeds and receives
+a map containing the authenticator flags, signature counter, user presence
+status, and other FIDO-specific fields.
 
-- **Require user presence** — reject authentication if the user did not
-  physically touch the security key.  This prevents automated use of a key
-  that was left plugged in:
+Common hardening and policy adjustments:
 
-  ```erlang
-  {sk_fido_verify_fun,
-   fun(#{user_presence := true}) -> ok;
-      (_) -> {error, no_user_presence}
-   end}
-  ```
-
-- **Require user verification** — require PIN or biometric verification in
-  addition to physical touch:
+- **Require user verification** — tighten the default policy to also require
+  PIN or biometric verification in addition to physical touch:
 
   ```erlang
   {sk_fido_verify_fun,
    fun(#{user_presence := true, user_verification := true}) -> ok;
       (_) -> {error, verification_required}
    end}
+  ```
+
+- **Relax user presence** — equivalent to OpenSSH's `no-touch-required`
+  authorized_keys option.  Accept any valid SK signature regardless of flags:
+
+  ```erlang
+  {sk_fido_verify_fun, fun(_) -> ok end}
   ```
 
 - **Counter tracking** — the FIDO counter is included in the callback map.

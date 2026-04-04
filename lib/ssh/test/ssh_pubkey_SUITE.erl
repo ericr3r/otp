@@ -1716,8 +1716,12 @@ sk_fido_counter_monotonicity(_Config) ->
 
 %%--------------------------------------------------------------------
 sk_fido_default_no_callback(_Config) ->
-    %% When sk_fido_verify_fun is undefined (default), SK auth with
-    %% flags=0x00 (no user presence) still succeeds — backward compat.
+    %% With no sk_fido_verify_fun callback configured, the server
+    %% enforces user presence (UP) by default — matching OpenSSH's
+    %% PUBKEYAUTH_TOUCH_REQUIRED behaviour.
+    %%
+    %% Part 1: flags=0x00 (no UP) must be REJECTED.
+    %% Part 2: flags=0x01 (UP set) must SUCCEED.
     {PubKey, PrivKey} = crypto:generate_key(eddsa, ed25519),
     Application = <<"ssh:">>,
     Key = {ed25519_sk, PubKey, Application},
@@ -1729,21 +1733,40 @@ sk_fido_default_no_callback(_Config) ->
     AlgStr = "sk-ssh-ed25519@openssh.com",
     AlgBin = list_to_binary(AlgStr),
     KeyBlob = iolist_to_binary(ssh_message:ssh2_pubkey_encode(Key)),
-    Flags = 16#00,   %% No UP, no UV
-    Counter = 16#00000000,
 
-    SigData = ssh_auth:build_sig_data(SessionId, User, "ssh-connection", KeyBlob, AlgStr),
-    SigBlob = sk_sign_ed25519(PrivKey, Application, SigData, Flags, Counter),
-    Data = sk_build_userauth_data(true, AlgBin, KeyBlob, SigBlob),
+    %% Part 1: UP=0 → rejected
+    Flags0 = 16#00,   %% No UP, no UV
+    Counter0 = 16#00000000,
+    SigData0 = ssh_auth:build_sig_data(SessionId, User, "ssh-connection", KeyBlob, AlgStr),
+    SigBlob0 = sk_sign_ed25519(PrivKey, Application, SigData0, Flags0, Counter0),
+    Data0 = sk_build_userauth_data(true, AlgBin, KeyBlob, SigBlob0),
+    Msg0 =
+        #ssh_msg_userauth_request{user = User,
+                                  service = "ssh-connection",
+                                  method = "publickey",
+                                  data = Data0},
+    Result0 = ssh_auth:handle_userauth_request(Msg0, SessionId, Ssh0),
+    {not_authorized, _, _} = Result0,
+    ct:log("M4.2 default_no_callback: auth correctly REJECTED with flags=0x00 "
+           "(no UP)"),
 
-    Msg = #ssh_msg_userauth_request{user = User,
-                                    service = "ssh-connection",
-                                    method = "publickey",
-                                    data = Data},
-    Result = ssh_auth:handle_userauth_request(Msg, SessionId, Ssh0),
+    %% Part 2: UP=1 → accepted
+    {Ssh1, Dir1} = sk_make_server_ssh(Key, User, SessionId),
+    Flags1 = 16#01,   %% UP set
+    Counter1 = 16#00000001,
+    SigData1 = ssh_auth:build_sig_data(SessionId, User, "ssh-connection", KeyBlob, AlgStr),
+    SigBlob1 = sk_sign_ed25519(PrivKey, Application, SigData1, Flags1, Counter1),
+    Data1 = sk_build_userauth_data(true, AlgBin, KeyBlob, SigBlob1),
+    Msg1 =
+        #ssh_msg_userauth_request{user = User,
+                                  service = "ssh-connection",
+                                  method = "publickey",
+                                  data = Data1},
+    Result1 = ssh_auth:handle_userauth_request(Msg1, SessionId, Ssh1),
     sk_cleanup_dir(Dir),
-    {authorized, User, {#ssh_msg_userauth_success{}, _}} = Result,
-    ct:log("M4.2 default_no_callback: auth OK with no callback and flags=0x00").
+    sk_cleanup_dir(Dir1),
+    {authorized, User, {#ssh_msg_userauth_success{}, _}} = Result1,
+    ct:log("M4.2 default_no_callback: auth OK with flags=0x01 (UP set)").
 
 %%--------------------------------------------------------------------
 sk_fido_callback_bad_return(_Config) ->

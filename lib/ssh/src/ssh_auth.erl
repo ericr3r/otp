@@ -565,17 +565,29 @@ verify_sig(SessionId, User, Service, AlgBin, KeyBlob, SigWLen, #ssh{opts = Opts}
             end,
         case ssh_transport:verify(PlainText, list_to_existing_atom(Alg), Sig, Key, Ssh) of
             true ->
-                %% Crypto verification succeeded; now apply FIDO policy callback
+                %% Crypto verification succeeded; now enforce FIDO policy.
+                %%
+                %% OpenSSH requires user presence (UP, flag bit 0x01) by
+                %% default for all SK signatures.  The only way to relax
+                %% this is the "no-touch-required" authorized_keys option,
+                %% which we model via the sk_fido_verify_fun callback
+                %% returning `ok' even when UP is false.
+                %%
+                %% When no callback is configured we mirror OpenSSH's
+                %% default: require UP=1.
+                UserPresence = Flags band 16#01 =/= 0,
                 FidoInfo =
                     #{flags => Flags,
                       counter => Counter,
-                      user_presence => Flags band 16#01 =/= 0,      % FIDO UP flag
+                      user_presence => UserPresence,
                       user_verification => Flags band 16#04 =/= 0,  % FIDO UV flag
                       user => User,
                       algorithm => list_to_existing_atom(Alg)},
                 case ?GET_OPT(sk_fido_verify_fun, Opts) of
                     undefined ->
-                        true;
+                        %% No policy callback — enforce UP by default,
+                        %% matching OpenSSH's PUBKEYAUTH_TOUCH_REQUIRED.
+                        UserPresence;
                     VerifyFun when is_function(VerifyFun, 1) ->
                         case VerifyFun(FidoInfo) of
                             ok ->

@@ -1018,8 +1018,18 @@ callback is invoked with a map containing:
 
 Return `ok` to allow authentication, or `{error, Reason}` to reject.
 
-If not set (default: `undefined`), authentication succeeds whenever the
-cryptographic signature is valid.
+**Default behaviour (when `undefined`):** User presence (UP, the
+authenticator touch flag) is required.  Signatures that do not have the
+UP bit set are rejected, matching OpenSSH's default
+`PUBKEYAUTH_TOUCH_REQUIRED` policy.
+
+To **relax** this requirement (equivalent to OpenSSH's
+`no-touch-required` authorized_keys option), supply a callback that
+returns `ok` regardless of the `user_presence` value.
+
+To **tighten** the policy (e.g. also require user verification / PIN),
+check the `user_verification` field and return `{error, Reason}` when
+it is `false`.
 """.
 -doc(#{group => <<"Daemon Options">>}).
 -type sk_fido_verify_fun() :: fun((sk_fido_info()) -> ok | {error, term()}) | undefined.

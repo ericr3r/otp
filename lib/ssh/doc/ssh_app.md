@@ -432,17 +432,31 @@ following keys:
 - `algorithm` — the negotiated algorithm atom
 
 The callback must return `ok` to allow authentication, or `{error, Reason}` to
-reject it.  If `sk_fido_verify_fun` is not set (the default), authentication
-succeeds whenever the cryptographic signature is valid.
+reject it.
 
-Example — require user presence (touch):
+If `sk_fido_verify_fun` is not set (the default), user presence (UP — the
+authenticator touch flag) is **required**.  Signatures without the UP bit set
+are rejected, matching OpenSSH's default `PUBKEYAUTH_TOUCH_REQUIRED` policy.
+
+Example — relax the user-presence requirement (equivalent to OpenSSH's
+`no-touch-required` authorized_keys option):
 
 ```erlang
 ssh:daemon(2222,
            [{system_dir, "/etc/ssh"},
             {sk_fido_verify_fun,
-             fun(#{user_presence := true}) -> ok;
-                (_) -> {error, no_user_presence}
+             fun(_) -> ok end}]).
+```
+
+Example — tighten the policy to also require user verification (PIN or
+biometric):
+
+```erlang
+ssh:daemon(2222,
+           [{system_dir, "/etc/ssh"},
+            {sk_fido_verify_fun,
+             fun(#{user_presence := true, user_verification := true}) -> ok;
+                (_) -> {error, verification_required}
              end}]).
 ```
 
