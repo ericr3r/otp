@@ -66,22 +66,10 @@ is available with the key `key_cb_private`.
 %%%****************************************************************
 %%% Check that PublicKey is known to be a public key for the User
 
--doc """
-Checks if the user key is authorized.
-
-May return `{true, KeyOptions}` instead of `true` to pass per-key
-options parsed from the `authorized_keys` line.  For example, a line
-starting with `no-touch-required` produces
-`{true, ["no-touch-required"]}`, which tells the server to skip the
-FIDO user-presence (UP) check for that key — matching OpenSSH's
-per-key `no-touch-required` behaviour.
-
-Implementations that return plain `boolean()` continue to work
-unchanged — the server treats `true` as equivalent to `{true, []}`.
-""".
+-doc "Checks if the user key is authorized.".
 -doc(#{since => <<"OTP R16B">>}).
 -callback is_auth_key(PublicKey :: public_key:public_key(),
 		      User :: string(),
 		      DaemonOptions :: daemon_key_cb_options(any())
                      ) ->
-    boolean() | {true, KeyOptions :: proplists:proplist()}.
+    boolean().

@@ -555,12 +555,7 @@ get_password_option(Opts, User) ->
 pre_verify_sig(User, KeyBlob,  #ssh{opts=Opts}) ->
     try
 	Key = ssh_message:ssh2_pubkey_decode(KeyBlob), % or exception
-        case ssh_transport:call_KeyCb(is_auth_key, [Key, User], Opts) of
-            {true, _KeyOpts} ->
-                true;
-            Other ->
-                Other
-        end
+        ssh_transport:call_KeyCb(is_auth_key, [Key, User], Opts)
     catch
 	_:_ ->
 	    false
@@ -588,16 +583,23 @@ verify_sig(SessionId, User, Service, AlgBin, KeyBlob, SigWLen, #ssh{opts = Opts}
             lists:member(list_to_existing_atom(Alg),
                          proplists:get_value(public_key, ?GET_OPT(preferred_algorithms, Opts))),
         Key = ssh_message:ssh2_pubkey_decode(KeyBlob),
-        %% is_auth_key may return true | {true, KeyOpts} | false.
-        %% Extract per-key options so we can honour "no-touch-required".
+        %% Check authorization via the key callback module.
+        true = ssh_transport:call_KeyCb(is_auth_key, [Key, User], Opts),
+        %% Retrieve per-key options (e.g. "no-touch-required") from
+        %% the authorized_keys file.  This calls ssh_file directly
+        %% rather than through the key callback, since auth_key_options
+        %% is not part of the ssh_server_key_api behaviour.  If a custom
+        %% key_cb is used that does not back onto ssh_file, no per-key
+        %% options will be found and UP enforcement remains the safe default.
+        {_KeyCb, KeyCbOpts} = ?GET_OPT(key_cb, Opts),
+        UserOpts = ?GET_OPT(key_cb_options, Opts),
+        MergedOpts = [{key_cb_private,KeyCbOpts}|UserOpts],
         KeyOpts =
-            case ssh_transport:call_KeyCb(is_auth_key, [Key, User], Opts) of
+            case catch ssh_file:auth_key_options(Key, User, MergedOpts) of
                 {true, KO} when is_list(KO) ->
                     KO;
-                true ->
-                    [];
                 _ ->
-                    throw(not_authorized)
+                    []
             end,
         PlainText = build_sig_data(SessionId, User, Service, KeyBlob, Alg),
         <<?UINT32(AlgSigLen), AlgSig:AlgSigLen/binary>> = SigWLen,
@@ -690,16 +692,7 @@ verify_sig(SessionId, User, Service, AlgBin, KeyBlob, SigWLen, #ssh{opts=Opts} =
                             proplists:get_value(public_key,
                                                 ?GET_OPT(preferred_algorithms,Opts))),
         Key = ssh_message:ssh2_pubkey_decode(KeyBlob), % or exception
-        %% Normalize is_auth_key return for backward compatibility:
-        %% accept true | {true, _KeyOpts} — options are only used by the
-        %% SK clause above; non-SK keys just need the boolean.
-        true =
-            case ssh_transport:call_KeyCb(is_auth_key, [Key, User], Opts) of
-                {true, _} ->
-                    true;
-                Other ->
-                    Other
-            end,
+        true = ssh_transport:call_KeyCb(is_auth_key, [Key, User], Opts),
         PlainText = build_sig_data(SessionId, User, Service, KeyBlob, Alg),
         <<?UINT32(AlgSigLen), AlgSig:AlgSigLen/binary>> = SigWLen,
         <<?UINT32(AlgLen), _Alg:AlgLen/binary,

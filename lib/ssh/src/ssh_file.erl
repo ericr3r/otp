@@ -195,7 +195,7 @@ Clients uses all files stored in the [USERDIR](`m:ssh_file#USERDIR`) directory.
 
 %%%--------------------- server exports ---------------------------
 -behaviour(ssh_server_key_api).
--export([host_key/2, is_auth_key/3]).
+-export([host_key/2, is_auth_key/3, auth_key_options/3]).
 -export_type([system_dir_daemon_option/0]).
 -doc "Sets the [system directory](`m:ssh_file#SYSDIR`).".
 -doc(#{group => <<"Options">>}).
@@ -328,6 +328,24 @@ files when reading them.
       Options :: ssh_server_key_api:daemon_key_cb_options(optimize_key_lookup()).
 
 is_auth_key(Key0, User, Opts) ->
+    case auth_key_options(Key0, User, Opts) of
+        {true, _KeyOpts} -> true;
+        false -> false
+    end.
+
+%% Like is_auth_key/3 but returns {true, KeyOptions} on match, where
+%% KeyOptions is a list of per-key options parsed from the
+%% authorized_keys line (e.g. ["no-touch-required"]).  Returns false
+%% if the key is not found.  Used internally by the SK verification
+%% path to extract per-key options without changing the public
+%% is_auth_key callback contract.
+-spec auth_key_options(Key, User, Options) -> {true, KeyOptions} | false when
+      Key :: public_key:public_key(),
+      User :: string(),
+      Options :: ssh_server_key_api:daemon_key_cb_options(optimize_key_lookup()),
+      KeyOptions :: [string()].
+
+auth_key_options(Key0, User, Opts) ->
     Dir = ssh_dir({remoteuser,User}, Opts),
     ok = assure_file_mode(Dir, user_read),
     KeyType = normalize_alg(
