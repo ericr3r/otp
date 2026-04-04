@@ -67,6 +67,7 @@
          sk_exec_after_sk_auth/1, sk_sftp_after_sk_auth/1, sk_counter_increases/1,
          sk_flags_propagated/1]).
 
+-define(DOCKER_PFX, "ssh_sk_compat_suite-sk").
 -define(DOCKER_IMAGE, "ssh_sk_compat_suite").
 -define(DOCKER_TAG, "latest").
 -define(USER, "sshtester").
@@ -83,7 +84,7 @@ suite() ->
     [{timetrap, {seconds, 120}}].
 
 all() ->
-    [check_docker_sk_present, {group, sk_keygen}, {group, sk_auth}, {group, sk_advanced}].
+    [check_docker_sk_present | [{group, G} || G <- sk_image_versions()]].
 
 groups() ->
     [{sk_keygen, [], [sk_keygen_ecdsa_in_docker, sk_keygen_ed25519_in_docker]},
@@ -98,10 +99,50 @@ groups() ->
        sk_login_password_fallback_from_sk]},
      {sk_advanced,
       [],
-      [sk_exec_after_sk_auth,
-       sk_sftp_after_sk_auth,
-       sk_counter_increases,
-       sk_flags_propagated]}].
+      [sk_exec_after_sk_auth, sk_sftp_after_sk_auth, sk_counter_increases, sk_flags_propagated]}
+     | [{G, [], [{group, sk_keygen}, {group, sk_auth}, {group, sk_advanced}]}
+        || G <- sk_image_versions()]].
+
+%% @doc Discover available SK Docker images by scanning `docker images`
+%% output for repositories matching ?DOCKER_PFX (same discovery pattern
+%% as ssh_compat_SUITE).  Returns a sorted list of version atoms, e.g.
+%% ['openssh9.9p1'].  Falls back to checking for the legacy
+%% ?DOCKER_IMAGE:?DOCKER_TAG tag used by the run-sk-tests script.
+%%
+%% Uses `docker images --format` for reliable parsing across Docker and
+%% Podman versions (the default tabular output varies between versions:
+%% Docker uses "REPOSITORY TAG" columns while Podman/newer Docker uses
+%% a single "IMAGE" column with "name:tag" format).
+sk_image_versions() ->
+    try
+        %% --format produces one "REPOSITORY TAG" line per image, no header.
+        Raw = os:cmd("docker images --format '{{.Repository}} {{.Tag}}'"),
+        Lines = string:tokens(Raw, "\r\n"),
+        Rows = [string:tokens(L, " ") || L <- Lines],
+        %% Primary: look for ?DOCKER_PFX images (e.g. ssh_sk_compat_suite-sk)
+        Vs = [list_to_atom(V) || [?DOCKER_PFX, V | _] <- Rows, V =/= "latest"],
+        case Vs of
+            [] ->
+                %% Fallback: check for legacy ssh_sk_compat_suite:<ver|latest>
+                case [list_to_atom(V) || [?DOCKER_IMAGE, V | _] <- Rows, V =/= "latest"] of
+                    [] ->
+                        %% Check for exactly "latest" tag
+                        case [latest || [?DOCKER_IMAGE, "latest" | _] <- Rows] of
+                            [_ | _] ->
+                                [latest];
+                            [] ->
+                                []
+                        end;
+                    LegacyVs ->
+                        lists:sort(LegacyVs)
+                end;
+            _ ->
+                lists:sort(Vs)
+        end
+    catch
+        _:_ ->
+            []
+    end.
 
 %%--------------------------------------------------------------------
 %% Force-load our project's modified SSH modules.
@@ -110,42 +151,61 @@ groups() ->
 %% SK (FIDO) support to ssh_file, ssh_message, ssh_transport,
 %% ssh_auth, and ssh_options, so we must replace the system
 %% versions with ours after the application starts.
-init_per_suite( Config ) -> ?CHECK_CRYPTO( case os : find_executable( "docker" ) of false -> { skip , "Docker not found" } ; _DockerPath -> case docker_available( ) of false -> { skip , "Docker daemon not running" } ; true -> case sk_image_available( ) of false -> { skip , "Docker image " ?DOCKER_IMAGE ":" ?DOCKER_TAG " not found. Build it with: " "lib/ssh/test/ssh_sk_compat_SUITE_data/" "build_scripts/create-sk-image" } ; true -> DataDir = proplists : get_value( data_dir , Config ) , TestDir = filename : dirname( filename : dirname( DataDir ) ) , SshDir = filename : dirname( TestDir ) , ProjectEbin = filename : join( SshDir , "ebin" ) , ct : log( "Adding project ebin to code path: ~s" , [ ProjectEbin ] ) , true = code : add_patha( ProjectEbin ) =/= { error , bad_directory } , ssh : start( ) , ForceLoad = [ ssh_file , ssh_message , ssh_transport , ssh_auth , ssh_options ] , lists : foreach( fun ( Mod ) -> code : purge( Mod ) , { module , Mod } = code : load_file( Mod ) , ct : log( "Loaded ~p from ~p" , [ Mod , code : which( Mod ) ] ) end , ForceLoad ) , ct : log( "Docker SK image available" ) , ct : log( "Crypto info: ~p" , [ crypto : info_lib( ) ] ) , Config end end end ) .
+init_per_suite( Config ) -> ?CHECK_CRYPTO( case os : find_executable( "docker" ) of false -> { skip , "Docker not found" } ; _DockerPath -> case docker_available( ) of false -> { skip , "Docker daemon not running" } ; true -> case sk_image_versions( ) of [ ] -> { skip , "No SK Docker image found (expected " ?DOCKER_PFX ":* or " ?DOCKER_IMAGE ":" ?DOCKER_TAG "). Build with: " "lib/ssh/test/ssh_sk_compat_SUITE_data/" "build_scripts/create-sk-image" } ; Versions -> ct : log( "SK Docker image versions found: ~p" , [ Versions ] ) , DataDir = proplists : get_value( data_dir , Config ) , TestDir = filename : dirname( filename : dirname( DataDir ) ) , SshDir = filename : dirname( TestDir ) , ProjectEbin = filename : join( SshDir , "ebin" ) , ct : log( "Adding project ebin to code path: ~s" , [ ProjectEbin ] ) , true = code : add_patha( ProjectEbin ) =/= { error , bad_directory } , ssh : start( ) , ForceLoad = [ ssh_file , ssh_message , ssh_transport , ssh_auth , ssh_options ] , lists : foreach( fun ( Mod ) -> code : purge( Mod ) , { module , Mod } = code : load_file( Mod ) , ct : log( "Loaded ~p from ~p" , [ Mod , code : which( Mod ) ] ) end , ForceLoad ) , ct : log( "Docker SK image available" ) , ct : log( "Crypto info: ~p" , [ crypto : info_lib( ) ] ) , Config end end end ) .
 
 end_per_suite(_Config) ->
     catch ssh:stop(),
     ok.
 
 %%--------------------------------------------------------------------
-init_per_group(_Group, Config) ->
-    case start_sk_docker() of
-        {ok,
-         #{id := Id,
-           ip := IP,
-           ssh_port := Port} =
-             DockerInfo} ->
-            ct:log("Docker container started: ~p", [DockerInfo]),
-            case wait_for_sshd(IP, Port, 30) of
-                ok ->
-                    [{docker_id, Id}, {docker_ip, IP}, {docker_port, Port} | Config];
+init_per_group(Group, Config) ->
+    case lists:member(Group, [sk_keygen, sk_auth, sk_advanced]) of
+        true ->
+            %% Sub-group: container already started by the version group
+            Config;
+        false ->
+            %% Version group (e.g. 'openssh9.9p1' or 'latest'):
+            %% start a Docker container for this version.
+            ImageTag = sk_image_tag(Group),
+            ct:log("Starting SK Docker container from image ~s", [ImageTag]),
+            case start_sk_docker(ImageTag) of
+                {ok,
+                 #{id := Id,
+                   ip := IP,
+                   ssh_port := Port} =
+                     DockerInfo} ->
+                    ct:log("Docker container started: ~p", [DockerInfo]),
+                    case wait_for_sshd(IP, Port, 30) of
+                        ok ->
+                            [{docker_id, Id},
+                             {docker_ip, IP},
+                             {docker_port, Port},
+                             {sk_image_tag, ImageTag}
+                             | Config];
+                        {error, Reason} ->
+                            stop_sk_docker(Id),
+                            {fail, {sshd_not_ready, Reason}}
+                    end;
                 {error, Reason} ->
-                    stop_sk_docker(Id),
-                    {fail, {sshd_not_ready, Reason}}
-            end;
-        {error, Reason} ->
-            {skip,
-             lists:flatten(
-                 io_lib:format("Can't start Docker: ~p", [Reason]))}
+                    {skip,
+                     lists:flatten(
+                         io_lib:format("Can't start Docker (~s): ~p", [ImageTag, Reason]))}
+            end
     end.
 
-end_per_group(_Group, Config) ->
-    case proplists:get_value(docker_id, Config) of
-        undefined ->
+end_per_group(Group, Config) ->
+    case lists:member(Group, [sk_keygen, sk_auth, sk_advanced]) of
+        true ->
             ok;
-        Id ->
-            catch stop_sk_docker(Id)
-    end,
-    ok.
+        false ->
+            case proplists:get_value(docker_id, Config) of
+                undefined ->
+                    ok;
+                Id ->
+                    catch stop_sk_docker(Id)
+            end,
+            ok
+    end.
 
 %%--------------------------------------------------------------------
 init_per_testcase(_TC, Config) ->
@@ -161,18 +221,26 @@ end_per_testcase(_TC, _Config) ->
 %% @doc Verify that the Docker SK image is present and functional.
 check_docker_sk_present(_Config) ->
     true = docker_available(),
-    true = sk_image_available(),
-    %% Verify the image has sk-dummy.so in one of the expected paths
+    Versions = sk_image_versions(),
+    case Versions of
+        [] ->
+            ct:fail("No SK Docker images found");
+        _ ->
+            ok
+    end,
+    %% Check the first available image for sk-dummy.so
+    ImageTag = sk_image_tag(hd(Versions)),
+    ct:log("Checking SK Docker image: ~s (all versions: ~p)", [ImageTag, Versions]),
     CheckCmd =
         "for p in /buildroot/ssh/lib/sk-dummy.so /buildroot/ssh/libexec/sk-du"
         "mmy.so; do test -f $p && echo SK_DUMMY_OK && exit 0; done; "
         "echo SK_DUMMY_MISSING",
-    {ok, Output} = docker_run_cmd(?DOCKER_IMAGE ++ ":" ++ ?DOCKER_TAG, CheckCmd),
+    {ok, Output} = docker_run_cmd(ImageTag, CheckCmd),
     case binary:match(iolist_to_binary(Output), <<"SK_DUMMY_OK">>) of
         nomatch ->
-            ct:fail("sk-dummy.so not found in Docker image");
+            ct:fail("sk-dummy.so not found in Docker image ~s", [ImageTag]);
         _ ->
-            ct:log("sk-dummy.so confirmed present in Docker image"),
+            ct:log("sk-dummy.so confirmed present in Docker image ~s", [ImageTag]),
             ok
     end.
 
@@ -506,19 +574,16 @@ docker_available() ->
             false
     end.
 
-%% @doc Check if the SK Docker image exists.
-sk_image_available() ->
-    Cmd = "docker images -q " ++ ?DOCKER_IMAGE ++ ":" ++ ?DOCKER_TAG,
-    case string:trim(
-             os:cmd(Cmd))
-    of
-        "" ->
-            false;
-        _ ->
-            true
-    end.
+%% @doc Return the full Docker image:tag string for a version group atom.
+%% Maps version atoms discovered by sk_image_versions/0 to image tags:
+%%   'openssh9.9p1' -> "ssh_sk_compat_suite-sk:openssh9.9p1"
+%%   'latest'       -> "ssh_sk_compat_suite:latest"  (legacy fallback)
+sk_image_tag(latest) ->
+    ?DOCKER_IMAGE ++ ":" ++ ?DOCKER_TAG;
+sk_image_tag(Version) ->
+    ?DOCKER_PFX ++ ":" ++ atom_to_list(Version).
 
-%% @doc Start a Docker container from the SK image.
+%% @doc Start a Docker container from the given SK image tag.
 %% Returns {ok, #{id, ip, ssh_port}} | {error, Reason}.
 %%
 %% We use --network=host so the container shares the host's network
@@ -532,10 +597,9 @@ sk_image_available() ->
 %% on the actual host.  The Erlang daemon binds to a random port, so
 %% there is no conflict.  The Docker SSH client inside the container
 %% connects to 127.0.0.1:<erlang_port>.
-start_sk_docker() ->
+start_sk_docker(ImageTag) ->
     Cmd = lists:flatten(
-              io_lib:format("docker run -d --rm --network=host ~s:~s",
-                            [?DOCKER_IMAGE, ?DOCKER_TAG])),
+              io_lib:format("docker run -d --rm --network=host ~s", [ImageTag])),
     Id0 = string:trim(
               os:cmd(Cmd)),
     case is_docker_sha(Id0) of

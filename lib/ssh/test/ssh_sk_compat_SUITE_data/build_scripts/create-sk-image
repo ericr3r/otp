@@ -207,6 +207,11 @@ docker build \
 # Tag with the standard prefix for discovery by the test suite
 docker tag "${IMAGE_TAG}" "${DOCKER_PFX}:${OPENSSH_VER}"
 
+# Also tag as ssh_sk_compat_suite:latest for backward compatibility
+# (the run-sk-tests script and legacy test suite configurations use this name)
+docker tag "${IMAGE_TAG}" "ssh_sk_compat_suite:latest"
+docker tag "${IMAGE_TAG}" "ssh_sk_compat_suite:openssh${OPENSSH_VER}"
+
 echo ""
 echo "=== Build complete ==="
 echo "Image: ${IMAGE_TAG}"

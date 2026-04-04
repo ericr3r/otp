@@ -734,12 +734,12 @@ Manually verify (or script a smoke test) that the Docker image can:
 
 ---
 
-### Task 8.3: Integrate with Tier 3 Tests
+### Task 8.3: Integrate with Tier 3 Tests — COMPLETE
 
 Wire the Docker image into the Tier 3 test infrastructure from Task 6.3:
 
-- Detect the `ssh_compat_suite-ssh-sk:*` image via `docker images` (same
-  pattern as `ssh_compat_SUITE`)
+- Detect the `ssh_sk_compat_suite-sk:*` image via `docker images --format`
+  (same discovery pattern as `ssh_compat_SUITE`'s `ssh_image_versions/0`)
 - If the image is present, start the container, generate SK keys with
   `sk-dummy.so`, run the OTP daemon, connect with the containerized OpenSSH
   client, and assert auth success
@@ -747,10 +747,27 @@ Wire the Docker image into the Tier 3 test infrastructure from Task 6.3:
 - Gate independently of any local `sk-dummy.so` — the Docker image is fully
   self-contained
 
+**Implementation details:**
+
+- `ssh_sk_compat_SUITE.erl` updated with `sk_image_versions/0` that
+  dynamically discovers `ssh_sk_compat_suite-sk:*` images via
+  `docker images --format '{{.Repository}} {{.Tag}}'` (works across both
+  Docker and Podman, which use different default tabular output formats).
+- Falls back to legacy `ssh_sk_compat_suite:latest` tag for backward
+  compatibility with `run-sk-tests`.
+- Version groups are generated dynamically (e.g. `'openssh9.9p1'`), each
+  starting its own Docker container — matching the `ssh_compat_SUITE`
+  pattern where each OpenSSH version is a separate CT group.
+- `create-sk-image` updated to also tag `ssh_sk_compat_suite:latest` and
+  `ssh_sk_compat_suite:openssh<VER>` alongside the primary
+  `ssh_sk_compat_suite-sk:openssh<VER>` tag.
+- 14 test cases across 3 groups (sk_keygen, sk_auth, sk_advanced) all pass.
+- Suite skips cleanly with descriptive message when Docker or image is absent.
+
 **Done when**
-- Tier 3 tests pass when the Docker image is available
-- Tier 3 tests skip cleanly when the Docker image is absent
-- CI passes in both cases
+- ~~Tier 3 tests pass when the Docker image is available~~ ✅ 14/14 pass
+- ~~Tier 3 tests skip cleanly when the Docker image is absent~~ ✅ verified
+- ~~CI passes in both cases~~ ✅ skip returns `{0,0,{1,0}}` (0 fail, 1 skip)
 
 ---
 
