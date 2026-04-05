@@ -1706,10 +1706,24 @@ mk_dss_sig(DerSignature) ->
     <<R:160/big-unsigned-integer, S:160/big-unsigned-integer>>.
 
 %%%----------------------------------------------------------------
+
+-spec verify(PlainText, Alg, Sig, Key, Ssh) -> boolean() when
+      PlainText :: binary(),
+      Alg :: pubkey_alg(),
+      Sig :: binary(),
+      Key :: ssh_public_key(),
+      Ssh :: #ssh{}.
+
 verify(PlainText, Alg, Sig, Key, Ssh) ->
     do_verify(PlainText, sha(Alg), Sig, Key, Ssh).
 
 
+-spec do_verify(PlainText, HashAlg, Sig, Key, Ssh) -> boolean() when
+        PlainText :: binary(),
+        HashAlg :: crypto:sha1() | crypto:sha2() | undefined,
+        Sig :: binary(),
+        Key :: ssh_public_key(),
+        Ssh :: #ssh{} | term().
 do_verify(PlainText, HashAlg, Sig, {_,  #'Dss-Parms'{}} = Key, _) ->
     case Sig of
         <<R:160/big-unsigned-integer, S:160/big-unsigned-integer>> ->
