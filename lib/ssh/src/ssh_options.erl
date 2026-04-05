@@ -516,6 +516,14 @@ default(server) ->
             class => user_option
            },
 
+      sk_fido_counter_fun =>
+          #{default => undefined,
+            chk => fun(undefined) -> true;
+                      (F) -> check_function1(F)
+                   end,
+            class => user_option
+           },
+
       pk_check_user =>
           #{default => false,
             chk => fun(V) -> erlang:is_boolean(V) end,

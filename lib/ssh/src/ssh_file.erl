@@ -85,6 +85,10 @@ Clients uses all files stored in the [USERDIR](`m:ssh_file#USERDIR`) directory.
     key for curve 25519 (optional)
   - `ssh_host_ed448_key`{: #FILE-ssh_host_ed448_key } \- private eddsa host key
     for curve 448 (optional)
+  - `ssh_host_ecdsa_sk_key`{: #FILE-ssh_host_ecdsa_sk_key } \- private ecdsa-sk
+    host key for FIDO/U2F security keys (optional)
+  - `ssh_host_ed25519_sk_key`{: #FILE-ssh_host_ed25519_sk_key } \- private
+    ed25519-sk host key for FIDO/U2F security keys (optional)
 
   The key files could be generated with OpenSSH's ssh-keygen command.
 
@@ -123,6 +127,8 @@ Clients uses all files stored in the [USERDIR](`m:ssh_file#USERDIR`) directory.
              | 'ssh-ecdsa-nistp521'
              | 'ssh-ed25519'
     	 | 'ssh-ed448'
+             | 'sk-ecdsa-sha2-nistp256@openssh.com'
+         | 'sk-ssh-ed25519@openssh.com'
     base64-encoded-key :: % The user's public key
     comment :: % Comments are skipped
     ```
@@ -151,6 +157,8 @@ Clients uses all files stored in the [USERDIR](`m:ssh_file#USERDIR`) directory.
              | 'ssh-ecdsa-nistp521'
              | 'ssh-ed25519'
     	 | 'ssh-ed448'
+             | 'sk-ecdsa-sha2-nistp256@openssh.com'
+         | 'sk-ssh-ed25519@openssh.com'
     key :: % encoded key from eg ssh_host_*.pub
     ```
 
@@ -162,6 +170,10 @@ Clients uses all files stored in the [USERDIR](`m:ssh_file#USERDIR`) directory.
     (optional)
   - `id_ed448`{: #FILE-id_ed448 } \- private eddsa user key for curve 448
     (optional)
+  - `id_ecdsa_sk`{: #FILE-id_ecdsa_sk } \- private ecdsa-sk user key for
+    FIDO/U2F security keys (optional)
+  - `id_ed25519_sk`{: #FILE-id_ed25519_sk } \- private ed25519-sk user key for
+    FIDO/U2F security keys (optional)
 
   The key files could be generated with OpenSSH's ssh-keygen command.
 
@@ -183,7 +195,7 @@ Clients uses all files stored in the [USERDIR](`m:ssh_file#USERDIR`) directory.
 
 %%%--------------------- server exports ---------------------------
 -behaviour(ssh_server_key_api).
--export([host_key/2, is_auth_key/3]).
+-export([host_key/2, is_auth_key/3, auth_key_options/3]).
 -export_type([system_dir_daemon_option/0]).
 -doc "Sets the [system directory](`m:ssh_file#SYSDIR`).".
 -doc(#{group => <<"Options">>}).
@@ -316,14 +328,40 @@ files when reading them.
       Options :: ssh_server_key_api:daemon_key_cb_options(optimize_key_lookup()).
 
 is_auth_key(Key0, User, Opts) ->
+    case auth_key_options(Key0, User, Opts) of
+        {true, _KeyOpts} -> true;
+        false -> false
+    end.
+
+%% Like is_auth_key/3 but returns {true, KeyOptions} on match, where
+%% KeyOptions is a list of per-key options parsed from the
+%% authorized_keys line (e.g. ["no-touch-required"]).  Returns false
+%% if the key is not found.  Used internally by the SK verification
+%% path to extract per-key options without changing the public
+%% is_auth_key callback contract.
+-spec auth_key_options(Key, User, Options) -> {true, KeyOptions} | false when
+      Key :: public_key:public_key(),
+      User :: string(),
+      Options :: ssh_server_key_api:daemon_key_cb_options(optimize_key_lookup()),
+      KeyOptions :: [string()].
+
+auth_key_options(Key0, User, Opts) ->
     Dir = ssh_dir({remoteuser,User}, Opts),
     ok = assure_file_mode(Dir, user_read),
     KeyType = normalize_alg(
                 erlang:atom_to_binary(ssh_transport:public_algo(Key0), latin1)),
     Key = encode_key(Key0),
-    lookup_auth_keys(KeyType, Key, filename:join(Dir,"authorized_keys"), Opts)
-        orelse
-        lookup_auth_keys(KeyType, Key, filename:join(Dir,"authorized_keys2"), Opts).
+    case lookup_auth_keys(KeyType, Key, filename:join(Dir,"authorized_keys"), Opts) of
+        {true, KeyOpts} ->
+            {true, KeyOpts};
+        false ->
+            case lookup_auth_keys(KeyType, Key, filename:join(Dir,"authorized_keys2"), Opts) of
+                {true, KeyOpts2} ->
+                    {true, KeyOpts2};
+                false ->
+                    false
+            end
+    end.
 
 %%%---------------- CLIENT API ------------------------------------
 -doc """
@@ -533,14 +571,18 @@ decode(KeyBin, Type) when is_binary(KeyBin) andalso
     end;
 
 decode(KeyBin0, openssh_key) when is_binary(KeyBin0) ->
-    %% Ex: <<"ssh-rsa AAAAB12....3BC someone@example.com">>
+    %% One-liner format: "keytype base64-key comment..."
+    %% The comment field continues to end of line and may contain spaces.
+    %% See sshd(8) AUTHORIZED_KEYS and SSH_KNOWN_HOSTS FILE FORMAT.
     try
         [begin
              [_,K|Rest] = binary:split(Line, <<" ">>, [global,trim_all]),
              Key = ssh_message:ssh2_pubkey_decode(base64:decode(K)),
              case Rest of
-                 [Comment] -> {Key, [{comment,binary_to_list(Comment)}]};
-                 [] -> {Key,[]}
+                 [] -> {Key,[]};
+                 _ ->
+                     Comment = lists:join(" ", [binary_to_list(R) || R <- Rest]),
+                     {Key, [{comment, lists:flatten(Comment)}]}
              end
          end || Line <- split_in_nonempty_lines(KeyBin0)
         ]
@@ -590,7 +632,10 @@ decode(Bin, auth_keys) when is_binary(Bin) ->
                                   <<"rsa-sha2-">>,
                                   <<"ssh-dss">>,
                                   <<"ecdsa-sha2-nistp">>,
-                                  <<"ssh-ed">>
+                                  <<"ssh-ed">>,
+                                  %% FIDO/U2F security key types (prefix match)
+                                  <<"sk-ecdsa-sha2-">>,
+                                  <<"sk-ssh-ed25519">>
                                  ]) of
                 nomatch ->
                     [];
@@ -775,10 +820,14 @@ find_key(KeyType, Key, [Line | Lines]) ->
         [E1,E2|Es] = binary:split(Line, <<" ">>, [global,trim_all]),
         [normalize_alg(E1), normalize_alg(E2) | Es] % KeyType is in first or second element
     of
-        [_Options, KeyType, Key | _Comment] ->
-            true;
+        [Options, KeyType, Key | _Comment] when is_binary(Options) ->
+            %% Line has options prefix before key type.
+            %% Options are comma-separated (e.g. "no-touch-required,restrict").
+            ParsedOpts = [binary_to_list(O)
+                          || O <- binary:split(Options, <<",">>, [global, trim_all])],
+            {true, ParsedOpts};
         [KeyType, Key | _Comment] ->
-            true;
+            {true, []};
         _ ->
             find_key(KeyType, Key, Lines)
     catch
@@ -1256,6 +1305,9 @@ file_base_name(user,   'ssh-dss'            ) -> "id_dsa";
 file_base_name(user,   'ssh-ed25519'        ) -> "id_ed25519";
 file_base_name(user,   'ssh-ed448'          ) -> "id_ed448";
 file_base_name(user,   'ssh-rsa'            ) -> "id_rsa";
+%% SK file names follow OpenSSH convention (id_{alg}_sk for user, ssh_host_{alg}_sk_key for system)
+file_base_name(user,   'sk-ecdsa-sha2-nistp256@openssh.com') -> "id_ecdsa_sk";
+file_base_name(user,   'sk-ssh-ed25519@openssh.com') -> "id_ed25519_sk";
 file_base_name(system, 'ecdsa-sha2-nistp256') -> "ssh_host_ecdsa_key";
 file_base_name(system, 'ecdsa-sha2-nistp384') -> "ssh_host_ecdsa_key";
 file_base_name(system, 'ecdsa-sha2-nistp521') -> "ssh_host_ecdsa_key";
@@ -1266,6 +1318,8 @@ file_base_name(system, 'ssh-dss'            ) -> "ssh_host_dsa_key";
 file_base_name(system, 'ssh-ed25519'        ) -> "ssh_host_ed25519_key";
 file_base_name(system, 'ssh-ed448'          ) -> "ssh_host_ed448_key";
 file_base_name(system, 'ssh-rsa'            ) -> "ssh_host_rsa_key";
+file_base_name(system, 'sk-ecdsa-sha2-nistp256@openssh.com') -> "ssh_host_ecdsa_sk_key";
+file_base_name(system, 'sk-ssh-ed25519@openssh.com') -> "ssh_host_ed25519_sk_key";
 file_base_name(system, _                    ) -> "ssh_host_key".
 
 

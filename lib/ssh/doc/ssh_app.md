@@ -56,12 +56,16 @@ Some special configuration files from OpenSSH are also used:
 - `id_ecdsa`
 - `id_ed25519`
 - `id_ed448`
+- `id_ecdsa_sk`
+- `id_ed25519_sk`
 - `ssh_host_dsa_key` _(supported but disabled by default)_
 - `ssh_host_rsa_key` _(SHA1 sign/verify are supported but disabled by default
   from OTP-24)_
 - `ssh_host_ecdsa_key`
 - `ssh_host_ed25519_key`
 - `ssh_host_ed448_key`
+- `ssh_host_ecdsa_sk_key`
+- `ssh_host_ed25519_sk_key`
 
 By default, `ssh` looks for `id_*`, `known_hosts`, and `authorized_keys` in
 `~/.ssh`, and for the ssh\_host\_\*\_key files in `/etc/ssh`. These locations can
@@ -106,9 +110,10 @@ See [ssh_file](`m:ssh_file#FILE-authorized_keys`) for details.
 
 ## Host Keys
 
-RSA, DSA (if enabled), ECDSA, ED25519 and ED448 host keys are supported and are
-expected to be found in files named `ssh_host_rsa_key`, `ssh_host_dsa_key`,
-`ssh_host_ecdsa_key`, `ssh_host_ed25519_key` and `ssh_host_ed448_key`.
+RSA, DSA (if enabled), ECDSA, ED25519, ED448, ECDSA-SK and ED25519-SK host keys
+are supported and are expected to be found in files named `ssh_host_rsa_key`,
+`ssh_host_dsa_key`, `ssh_host_ecdsa_key`, `ssh_host_ed25519_key`,
+`ssh_host_ed448_key`, `ssh_host_ecdsa_sk_key` and `ssh_host_ed25519_sk_key`.
 
 See [ssh_file](`m:ssh_file#FILE-ssh_host_STAR_key`) for details.
 
@@ -172,6 +177,8 @@ for example the Option value
 - ecdsa-sha2-nistp256
 - rsa-sha2-512
 - rsa-sha2-256
+- sk-ecdsa-sha2-nistp256@openssh.com
+- sk-ssh-ed25519@openssh.com
 
 The following unsecure `SHA1` algorithms are supported but disabled by
 default:
@@ -393,6 +400,133 @@ The following RFCs are supported:
 - [Secure Shell (SSH) Key Exchange Method Using Curve25519 and Curve448](https://tools.ietf.org/html/rfc8731)
 - [RFC 8709](https://tools.ietf.org/html/rfc8709) Ed25519 and Ed448 public key
   algorithms for the Secure Shell (SSH) protocol
+
+## FIDO/U2F Security Key Support
+
+The SSH application supports server-side verification of FIDO/U2F security key
+authentication.  When an OpenSSH client authenticates using an `ecdsa-sk` or
+`ed25519-sk` key, the Erlang SSH daemon verifies the FIDO signature
+(including the authenticator data: application hash, flags, and counter)
+as part of public key authentication.
+
+The following algorithm names are registered:
+
+- `sk-ecdsa-sha2-nistp256@openssh.com` — ECDSA over NIST P-256 with FIDO
+- `sk-ssh-ed25519@openssh.com` — Ed25519 with FIDO
+
+These algorithms follow the format defined in the
+[OpenSSH PROTOCOL.u2f](https://github.com/openssh/openssh-portable/blob/master/PROTOCOL.u2f)
+specification.
+
+### Daemon option: sk_fido_counter_fun
+
+User presence (UP — the authenticator touch flag) is **enforced by default**
+for all FIDO security key authentications.  Every SK signature must have the
+UP bit set, meaning the user must physically touch the authenticator.
+
+The **only** way to relax this requirement is to prefix a key with
+`no-touch-required` in the server's `authorized_keys` file.  This is a
+per-key option, identical to how OpenSSH handles it:
+
+```text
+sk-ssh-ed25519@openssh.com AAAA... human-key
+no-touch-required sk-ssh-ed25519@openssh.com AAAA... headless-service-key
+```
+
+In the example above, the first key requires a physical touch on every
+authentication (the default).  The second key — marked `no-touch-required` —
+allows authentication without the UP flag, which is useful for headless or
+automated service accounts.
+
+The `sk_fido_counter_fun` callback **cannot** override user presence policy.
+It is purely for **signature counter monotonicity** enforcement.  The
+callback receives a map of type `sk_fido_counter_info()` with the following
+keys:
+
+- `counter` — the 32-bit signature counter from the authenticator
+- `key` — the decoded public key used for authentication
+- `user` — the username being authenticated (string)
+- `algorithm` — the negotiated algorithm atom
+
+The callback must return `ok` to allow authentication, or `{error, Reason}` to
+reject it.
+
+#### Default behaviour (no callback configured)
+
+If `sk_fido_counter_fun` is not set (the default), user presence is enforced
+(unless the key is marked `no-touch-required` in `authorized_keys`) but no
+counter monotonicity checking is performed.  The FIDO signature counter is
+included in cryptographic verification (so tampering causes verification
+failure), but the server does not track `last_seen_counter` per key or reject
+signatures where `counter <= last_seen_counter`.
+
+#### Custom callback behaviour
+
+When a callback is configured via `sk_fido_counter_fun`, it is invoked after
+cryptographic verification succeeds (regardless of the UP outcome).  The
+callback's sole purpose is to implement persistent counter tracking to detect
+cloned authenticator tokens — it **cannot** change user presence policy.
+
+Example — enforce counter monotonicity using an ETS table:
+
+```erlang
+%% Create a table to track last-seen counters
+ets:new(fido_counters, [named_table, public]),
+
+ssh:daemon(2222,
+           [{system_dir, "/etc/ssh"},
+            {sk_fido_counter_fun,
+             fun(#{counter := Counter, key := Key}) ->
+                 case ets:lookup(fido_counters, Key) of
+                     [{_, LastCounter}] when Counter =< LastCounter ->
+                         {error, counter_regression};
+                     _ ->
+                         ets:insert(fido_counters, {Key, Counter}),
+                         ok
+                 end
+             end}]).
+```
+
+> #### Note {: .info }
+>
+> The `sk_fido_counter_fun` callback is purely for counter monotonicity
+> enforcement.  It cannot override user presence (UP) policy.  UP is
+> controlled exclusively by the presence or absence of `no-touch-required`
+> in `authorized_keys` — not by this callback.
+
+Example — counter tracking with per-user logging:
+
+```erlang
+ssh:daemon(2222,
+           [{system_dir, "/etc/ssh"},
+            {sk_fido_counter_fun,
+             fun(#{counter := Counter, key := Key, user := User}) ->
+                 case check_and_update_counter(Key, Counter) of
+                     ok ->
+                         logger:info("FIDO auth: user=~s counter=~p", [User, Counter]),
+                         ok;
+                     {error, _} = Err ->
+                         logger:warning("FIDO counter regression: user=~s counter=~p", [User, Counter]),
+                         Err
+                 end
+             end}]).
+```
+
+### Known Limitations
+
+- **Server-side only** — the Erlang SSH application can *verify* FIDO
+  signatures from OpenSSH clients, but cannot *generate* them.  Client-side
+  FIDO signing would require hardware middleware (e.g., `libfido2`) and is out
+  of scope.
+
+- **Counter enforcement requires a callback** — the server does not track
+  `last_seen_counter` per key by default.  To detect cloned tokens via counter
+  regression, configure a `sk_fido_counter_fun` callback that implements
+  persistent counter tracking.  OpenSSH's own `sshd` also does not enforce
+  counter monotonicity by default.
+
+- **No attestation verification** — FIDO attestation certificates are not
+  checked.  This is consistent with OpenSSH's behaviour.
 
 ## See Also
 

@@ -187,6 +187,8 @@
 -define(do_del_opt(C,K,O),  ssh_options:delete_key(C,K,O, ?MODULE,?LINE)).
 -define(DELETE_INTERNAL_OPT(Key,Opts),  ?do_del_opt(internal_options,Key,Opts) ).
 
+%% Include public_key.hrl for record definitions used in SK key types
+-include_lib("public_key/include/public_key.hrl").
 
 %% Types
 -type role()                  :: client | server .
@@ -259,6 +261,7 @@ to run any subsystems.
         'ssh-ed448' |
         'rsa-sha2-256' |
         'rsa-sha2-512' |
+        sk_pubkey_alg() |
         legacy_pubkey_alg().
 
 -doc(#{group => <<"Legacy Algorithms">>}).
@@ -266,6 +269,27 @@ to run any subsystems.
         'ssh-rsa' |
         %% Gone in OpenSSH 7.3.p1:
         'ssh-dss'.
+
+-doc(#{group => <<"Common Options">>}).
+-doc "FIDO/U2F Security Key public key algorithms (OpenSSH PROTOCOL.u2f).".
+-type sk_pubkey_alg() ::
+'sk-ecdsa-sha2-nistp256@openssh.com' |
+'sk-ssh-ed25519@openssh.com'.
+
+%%% SK (FIDO/U2F Security Key) public key types.
+%%% These are SSH-specific and not part of public_key:public_key().
+%%% See OpenSSH PROTOCOL.u2f for the wire format specification.
+
+-doc "ECDSA-SK public key for FIDO/U2F security keys (secp256r1 curve).".
+-type ecdsa_sk_public_key() :: {ecdsa_sk, #'ECPoint'{}, secp256r1, Application :: binary()}.
+
+-doc "Ed25519-SK public key for FIDO/U2F security keys.".
+-type ed25519_sk_public_key() :: {ed25519_sk, PubKey :: binary(), Application :: binary()}.
+
+-doc "SSH-specific public key type including FIDO/U2F SK keys.".
+-type ssh_public_key() :: public_key:public_key() |
+            ecdsa_sk_public_key() |
+            ed25519_sk_public_key().
 
 -doc(#{group => <<"Common Options">>}).
 -type cipher_alg()  ::
@@ -999,7 +1023,47 @@ supporting ext-info.
       | {pk_check_user, boolean()}  
       | {password, string()}
       | {pwdfun, pwdfun_2() | pwdfun_4()}
-      | {no_auth_needed, boolean()}.
+      | {no_auth_needed, boolean()}
+      | {sk_fido_counter_fun, sk_fido_counter_fun()}.
+
+-doc """
+Optional callback for FIDO/U2F signature-counter monotonicity enforcement.
+
+User presence (UP — the authenticator touch flag) is enforced for FIDO
+security key signatures by default, matching OpenSSH's
+`PUBKEYAUTH_TOUCH_REQUIRED` policy.  The only way to relax this is by
+adding `no-touch-required` to the key's `authorized_keys` line — the
+same mechanism OpenSSH uses.  There is no programmatic override; the
+callback cannot change UP enforcement.
+
+After cryptographic verification succeeds, this
+callback — if configured — is invoked so applications can track the
+FIDO signature counter per key and reject replayed or cloned tokens.
+The callback receives a map with:
+
+- `counter` — the 32-bit monotonic signature counter from the authenticator
+- `key` — the decoded public key that was used for authentication
+- `user` — the authenticating username (string)
+- `algorithm` — the negotiated algorithm atom
+  (`'sk-ecdsa-sha2-nistp256@openssh.com'` or `'sk-ssh-ed25519@openssh.com'`)
+
+Return `ok` to allow authentication, or `{error, Reason}` to reject it
+(e.g. when the counter is not strictly greater than the last-seen value
+for this key).
+
+**Default behaviour (when `undefined`):** No counter enforcement.
+Cryptographic verification and user presence are still checked, but
+the counter value is not tracked.  This matches OpenSSH's default
+behaviour — `sshd` also does not enforce counter monotonicity.
+""".
+-doc(#{group => <<"Daemon Options">>}).
+-type sk_fido_counter_fun() :: fun((sk_fido_counter_info()) -> ok | {error, term()}) | undefined.
+
+-doc(#{group => <<"Daemon Options">>}).
+-type sk_fido_counter_info() :: #{counter := non_neg_integer(),
+                                  key := ssh_public_key(),
+                                  user := string(),
+                                  algorithm := atom()}.
 
 -doc(#{group => <<"Daemon Options">>}).
 -type prompt_texts() ::

@@ -57,6 +57,19 @@ limitations under the License.
 
   Own Id: OTP-19824 Aux Id: [PR-10512], [PR-10655]
 
+- Added server-side support for FIDO/U2F security key authentication
+  (`sk-ecdsa-sha2-nistp256@openssh.com` and `sk-ssh-ed25519@openssh.com`).
+  Erlang SSH daemons can now verify public key authentication from OpenSSH
+  clients using FIDO2 hardware security keys. User presence (UP) is enforced
+  by default, relaxable per-key via `no-touch-required` in `authorized_keys`.
+  A new `sk_fido_counter_fun` daemon option
+  enables a callback for signature counter monotonicity enforcement to
+  detect cloned tokens. See the
+  [SSH Application](ssh_app.md#fido-u2f-security-key-support) documentation
+  for details and known limitations.
+
+  Own Id: OTP-XXXXX
+
 [PR-10512]: https://github.com/erlang/otp/pull/10512
 [PR-10655]: https://github.com/erlang/otp/pull/10655
 

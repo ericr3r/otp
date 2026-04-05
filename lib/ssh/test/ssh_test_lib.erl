@@ -1287,6 +1287,8 @@ file_base_name(user,   'ssh-dss'            ) -> "id_dsa";
 file_base_name(user,   'ssh-ed25519'        ) -> "id_ed25519";
 file_base_name(user,   'ssh-ed448'          ) -> "id_ed448";
 file_base_name(user,   'ssh-rsa'            ) -> "id_rsa";
+file_base_name(user,   'sk-ecdsa-sha2-nistp256@openssh.com') -> "id_ecdsa_sk";
+file_base_name(user,   'sk-ssh-ed25519@openssh.com') -> "id_ed25519_sk";
 
 file_base_name(user_src, 'ecdsa-sha2-nistp256') -> "id_ecdsa256";
 file_base_name(user_src, 'ecdsa-sha2-nistp384') -> "id_ecdsa384";
@@ -1303,6 +1305,8 @@ file_base_name(system, 'ssh-dss'            ) -> "ssh_host_dsa_key";
 file_base_name(system, 'ssh-ed25519'        ) -> "ssh_host_ed25519_key";
 file_base_name(system, 'ssh-ed448'          ) -> "ssh_host_ed448_key";
 file_base_name(system, 'ssh-rsa'            ) -> "ssh_host_rsa_key";
+file_base_name(system, 'sk-ecdsa-sha2-nistp256@openssh.com') -> "ssh_host_ecdsa_sk_key";
+file_base_name(system, 'sk-ssh-ed25519@openssh.com') -> "ssh_host_ed25519_sk_key";
 
 file_base_name(system_src, 'ecdsa-sha2-nistp256') -> "ssh_host_ecdsa_key256";
 file_base_name(system_src, 'ecdsa-sha2-nistp384') -> "ssh_host_ecdsa_key384";

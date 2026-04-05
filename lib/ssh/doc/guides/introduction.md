@@ -73,7 +73,9 @@ The SSH Authentication Protocol is a general-purpose user authentication
 protocol run over the SSH Transport Layer Protocol. The `ssh` application
 supports user authentication as follows:
 
-- Using public key technology. RSA and DSA, X509-certificates are not supported.
+- Using public key technology. RSA, DSA, ECDSA, EdDSA, and FIDO/U2F security
+  keys (`ecdsa-sk`, `ed25519-sk`) are supported. X509-certificates are not
+  supported.
 - Using keyboard-interactive authentication. This is suitable for interactive
   authentication methods that do not need any special software support on the
   client side. Instead, all authentication data is entered from the keyboard.

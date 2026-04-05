@@ -51,6 +51,7 @@ MODULES= \
 	ssh_sftpd_erlclient_SUITE \
 	ssh_sup_SUITE \
 	ssh_to_openssh_SUITE \
+	ssh_sk_compat_SUITE \
 	ssh_upgrade_SUITE \
 	ssh_test_lib \
 	ssh_log_h \

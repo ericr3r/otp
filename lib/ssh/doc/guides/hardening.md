@@ -264,6 +264,55 @@ handling plugin `m:ssh_file`. The alternatives are:
   [`pk_check_user`](`m:ssh#option-pk_check_user`) to `true`. In that case the
   pwdfun will get the atom `pubkey` in the password argument.
 
+## FIDO Security Key Verification Policy
+
+When accepting FIDO/U2F security key authentication (`ecdsa-sk` or
+`ed25519-sk` keys from OpenSSH clients), the server **enforces user presence
+(UP) by default**.  Signatures without the authenticator-touch flag set are
+rejected, meaning the user must physically touch the security key.  This
+prevents automated use of a key that was left plugged in.
+
+The **only** way to relax the UP requirement is to prefix a key with
+`no-touch-required` in the daemon's `authorized_keys` file.  This is a
+per-key option, matching OpenSSH's behaviour, and is intended for headless
+or automated service accounts that cannot perform a physical touch:
+
+```text
+sk-ssh-ed25519@openssh.com AAAA... human-key
+no-touch-required sk-ssh-ed25519@openssh.com AAAA... headless-service-key
+```
+
+The `sk_fido_counter_fun` daemon callback **cannot** override or change the
+UP policy — it is purely for **signature counter monotonicity** enforcement.
+The callback is invoked after cryptographic verification succeeds
+(regardless of the UP outcome), and receives a map with the following keys:
+
+- `counter` — the 32-bit signature counter from the authenticator
+- `key` — the decoded public key used for authentication
+- `user` — the username being authenticated (string)
+- `algorithm` — the negotiated algorithm atom
+
+The callback must return `ok` to allow authentication, or `{error, Reason}` to
+reject it.
+
+- **Counter monotonicity enforcement** — track per-key counters to detect
+  cloned tokens.  The Erlang SSH server does not enforce counter monotonicity
+  by default (nor does OpenSSH), but the `sk_fido_counter_fun` callback
+  enables applications to implement their own tracking:
+
+  ```erlang
+  {sk_fido_counter_fun,
+   fun(#{counter := Counter, key := Key}) ->
+       case my_counter_db:check_and_update(Key, Counter) of
+           ok -> ok;
+           {error, _} = Err -> Err
+       end
+   end}
+  ```
+
+See the [SSH Application](ssh_app.md#fido-u2f-security-key-support)
+documentation for full details.
+
 ## Hardening in the cryptographic area
 
 ### Algorithm selection

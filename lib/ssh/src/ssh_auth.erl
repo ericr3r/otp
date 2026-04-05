@@ -36,7 +36,8 @@
          publickey_msg/1, password_msg/1, keyboard_interactive_msg/1,
 	 service_request_msg/1, init_userauth_request_msg/1,
 	 userauth_request_msg/1, handle_userauth_request/3, ssh_msg_userauth_result/1,
-	 handle_userauth_info_request/2, handle_userauth_info_response/2
+         handle_userauth_info_request/2, handle_userauth_info_response/2,
+         build_sig_data/5
 	]).
 
 -behaviour(ssh_dbg).
@@ -560,6 +561,130 @@ pre_verify_sig(User, KeyBlob,  #ssh{opts=Opts}) ->
 	    false
     end.
 
+%%
+%% SK signature wire format (OpenSSH PROTOCOL.u2f §"signatures"):
+%%   string   algorithm-name
+%%   string   inner-signature  (ECDSA mpint r||s, or Ed25519 64 bytes)
+%%   byte     flags            (bit 0: UP user-presence, bit 2: UV user-verified)
+%%   uint32   counter          (monotonic signature counter)
+%%
+%% After cryptographic verification, user presence (UP) is enforced
+%% matching OpenSSH's PUBKEYAUTH_TOUCH_REQUIRED — unless the key's
+%% authorized_keys line carries "no-touch-required", in which case
+%% UP is not checked for that key (same as OpenSSH per-key override).
+%% The optional sk_fido_counter_fun callback is then invoked so
+%% applications can enforce signature-counter monotonicity.
+verify_sig(SessionId, User, Service, AlgBin, KeyBlob, SigWLen, #ssh{opts = Opts} = Ssh)
+    when AlgBin =:= <<"sk-ecdsa-sha2-nistp256@openssh.com">>;
+         AlgBin =:= <<"sk-ssh-ed25519@openssh.com">> ->
+    try
+        Alg = binary_to_list(AlgBin),
+        true =
+            lists:member(list_to_existing_atom(Alg),
+                         proplists:get_value(public_key, ?GET_OPT(preferred_algorithms, Opts))),
+        Key = ssh_message:ssh2_pubkey_decode(KeyBlob),
+        %% Check authorization via the key callback module.
+        true = ssh_transport:call_KeyCb(is_auth_key, [Key, User], Opts),
+        %% Retrieve per-key options (e.g. "no-touch-required") from
+        %% the authorized_keys file.  This calls ssh_file directly
+        %% rather than through the key callback, since auth_key_options
+        %% is not part of the ssh_server_key_api behaviour.  If a custom
+        %% key_cb is used that does not back onto ssh_file, no per-key
+        %% options will be found and UP enforcement remains the safe default.
+        {_KeyCb, KeyCbOpts} = ?GET_OPT(key_cb, Opts),
+        UserOpts = ?GET_OPT(key_cb_options, Opts),
+        MergedOpts = [{key_cb_private,KeyCbOpts}|UserOpts],
+        KeyOpts =
+            case catch ssh_file:auth_key_options(Key, User, MergedOpts) of
+                {true, KO} when is_list(KO) ->
+                    KO;
+                _ ->
+                    []
+            end,
+        PlainText = build_sig_data(SessionId, User, Service, KeyBlob, Alg),
+        <<?UINT32(AlgSigLen), AlgSig:AlgSigLen/binary>> = SigWLen,
+        %% SK sigs: alg_name || inner_sig_string || flags_byte || counter_u32
+        <<?UINT32(AlgLen),
+          _SigAlg:AlgLen/binary,
+          ?UINT32(SigLen),
+          InnerSig:SigLen/binary,
+          FlagsAndCounter/binary>> =
+            AlgSig,
+        %% Reassemble for do_verify, which expects inner_sig || flags || counter
+        Sig = <<InnerSig/binary, FlagsAndCounter/binary>>,
+        %% Extract flags and counter from the last 5 bytes of Sig
+        %% (do_verify also splits them this way).  The 5-byte tail is
+        %% always present: flags:8 || counter:32.
+        SigSize = byte_size(Sig),
+        {Flags, Counter} =
+            case SigSize > 5 of
+                true ->
+                    FcOffset = SigSize - 5,
+                    <<_:FcOffset/binary, F:8, C:32/unsigned-big-integer>> = Sig,
+                    {F, C};
+                false ->
+                    %% Degenerate case – let verify reject it
+                    {0, 0}
+            end,
+        case ssh_transport:verify(PlainText, list_to_existing_atom(Alg), Sig, Key, Ssh) of
+            true ->
+                %% Crypto verification succeeded.
+                %%
+                %% Two independent checks follow.  Both must pass for
+                %% auth to succeed, but the counter callback is ALWAYS
+                %% invoked (when defined) so applications can track
+                %% every cryptographically-valid attempt — even those
+                %% that will be rejected for missing user presence.
+                %%
+                %% 1. Enforce user presence (UP).
+                %%    OpenSSH requires UP for SK signatures by default
+                %%    (PUBKEYAUTH_TOUCH_REQUIRED).  The only way to
+                %%    relax this is the "no-touch-required" option on
+                %%    the key's authorized_keys line — matching OpenSSH.
+                %%    There is no programmatic override via callback.
+                UserPresence = Flags band 16#01 =/= 0,
+                NoTouchRequired = lists:member("no-touch-required", KeyOpts),
+                UpOk = NoTouchRequired orelse UserPresence,
+
+                %% 2. Always invoke counter callback (when defined).
+                %%    The sk_fido_counter_fun callback lets applications
+                %%    track the last-seen counter per key and reject
+                %%    replayed/cloned tokens.  It runs regardless of UP
+                %%    so that every valid signature is recorded — a
+                %%    cloned key producing UP=0 signatures should still
+                %%    be visible to the counter tracker.
+                %%
+                %%    The callback result is evaluated independently:
+                %%    returning 'ok' does NOT override a UP failure.
+                CounterOk =
+                    case ?GET_OPT(sk_fido_counter_fun, Opts) of
+                        undefined ->
+                            true;
+                        CounterFun when is_function(CounterFun, 1) ->
+                            CounterInfo =
+                                #{counter => Counter,
+                                  key => Key,
+                                  user => User,
+                                  algorithm => list_to_existing_atom(Alg)},
+                            case CounterFun(CounterInfo) of
+                                ok ->
+                                    true;
+                                {error, _Reason} ->
+                                    false;
+                                _ ->
+                                    false
+                            end
+                    end,
+
+                %% Both checks must pass — they are independent.
+                UpOk andalso CounterOk;
+            false ->
+                false
+        end
+    catch
+        _:_ ->
+            false
+    end;
 verify_sig(SessionId, User, Service, AlgBin, KeyBlob, SigWLen, #ssh{opts=Opts} = Ssh) ->
     try
         Alg = binary_to_list(AlgBin),

@@ -231,6 +231,12 @@ supported_algorithms(kex) ->
 supported_algorithms(public_key) ->
     select_crypto_supported(
       [
+       %% FIDO/U2F security key types (server-side verification only).
+       %% Crypto capability is checked (ecdsa/eddsa), but actual FIDO
+       %% hardware is only needed for signing (client side, out of scope).
+       %% See OpenSSH PROTOCOL.u2f for the wire format specification.
+       {'sk-ssh-ed25519@openssh.com',         [{public_keys,eddsa}, {curves,ed25519}]},
+       {'sk-ecdsa-sha2-nistp256@openssh.com', [{public_keys,ecdsa}, {hashs,sha256}, {curves,secp256r1}]},
        {'ssh-ed25519',          [{public_keys,eddsa}, {curves,ed25519}                    ]},
        {'ssh-ed448',            [{public_keys,eddsa}, {curves,ed448}                      ]},
        {'ecdsa-sha2-nistp521',  [{public_keys,ecdsa}, {hashs,sha512}, {curves,secp521r1}]},
@@ -1700,10 +1706,24 @@ mk_dss_sig(DerSignature) ->
     <<R:160/big-unsigned-integer, S:160/big-unsigned-integer>>.
 
 %%%----------------------------------------------------------------
+
+-spec verify(PlainText, Alg, Sig, Key, Ssh) -> boolean() when
+      PlainText :: binary(),
+      Alg :: pubkey_alg(),
+      Sig :: binary(),
+      Key :: ssh_public_key(),
+      Ssh :: #ssh{}.
+
 verify(PlainText, Alg, Sig, Key, Ssh) ->
     do_verify(PlainText, sha(Alg), Sig, Key, Ssh).
 
 
+-spec do_verify(PlainText, HashAlg, Sig, Key, Ssh) -> boolean() when
+        PlainText :: binary(),
+        HashAlg :: crypto:sha1() | crypto:sha2() | undefined,
+        Sig :: binary(),
+        Key :: ssh_public_key(),
+        Ssh :: #ssh{} | term().
 do_verify(PlainText, HashAlg, Sig, {_,  #'Dss-Parms'{}} = Key, _) ->
     case Sig of
         <<R:160/big-unsigned-integer, S:160/big-unsigned-integer>> ->
@@ -1730,8 +1750,82 @@ do_verify(PlainText, HashAlg, Sig, #'RSAPublicKey'{}=Key, #ssh{role = server,
     public_key:verify(PlainText, HashAlg, Sig, Key)
         orelse public_key:verify(PlainText, sha, Sig, Key);
 
+%% ECDSA-SK (FIDO/U2F): verify sk-ecdsa-sha2-nistp256@openssh.com signature.
+%% The signature Sig arriving here is: inner_ecdsa_sig || flags:8 || counter:32.
+%% inner_ecdsa_sig is variable-length (mpint r || mpint s), so we split from
+%% the tail.  See OpenSSH PROTOCOL.u2f §"signatures" for the wire format.
+%% Verification is performed over the 69-byte FIDO authenticator data blob,
+%% NOT over PlainText directly.
+do_verify(PlainText, sha256,
+          Sig,
+          {ecdsa_sk, #'ECPoint'{} = Q, secp256r1, Application},
+          _Ssh) ->
+    %% Split Sig into inner ECDSA sig + flags(1) + counter(4)
+    SigSize = byte_size(Sig),
+    case SigSize > 5 of
+        true ->
+            InnerLen = SigSize - 5,
+            <<InnerSig:InnerLen/binary,
+              Flags:8, Counter:32/unsigned-big-integer>> = Sig,
+            AuthData = fido_authenticator_data(
+                         Application, Flags, Counter, PlainText),
+            case InnerSig of
+                <<?UINT32(Rlen),
+                  R:Rlen/big-signed-integer-unit:8,
+                  ?UINT32(Slen),
+                  S:Slen/big-signed-integer-unit:8>> ->
+                    Sval = #'ECDSA-Sig-Value'{r=R, s=S},
+                    DerEncodedSig = public_key:der_encode(
+                               'ECDSA-Sig-Value', Sval),
+                    public_key:verify(
+                      AuthData, sha256, DerEncodedSig,
+                      {Q, {namedCurve, ?secp256r1}});
+                _ ->
+                    false
+            end;
+        false ->
+            false
+    end;
+
+%% Ed25519-SK (FIDO/U2F): verify sk-ssh-ed25519@openssh.com signature.
+%% The signature Sig is: inner_ed25519_sig(64 bytes) || flags:8 || counter:32.
+%% Inner Ed25519 signatures are always 64 bytes, so direct pattern match works.
+%% See OpenSSH PROTOCOL.u2f §"signatures" for the wire format.
+do_verify(PlainText, undefined,
+          Sig,
+          {ed25519_sk, PubKey, Application},
+          _Ssh) when is_binary(PubKey), byte_size(PubKey) =:= 32 ->
+    %% Split Sig into inner Ed25519 sig (64 bytes) + flags(1) + counter(4)
+    case Sig of
+        <<InnerSig:64/binary,
+          Flags:8, Counter:32/unsigned-big-integer>> ->
+            AuthData = fido_authenticator_data(
+                         Application, Flags, Counter, PlainText),
+            %% Ed25519 key as {#'ECPoint'{}, {namedCurve, id-Ed25519}}
+            ECPoint = #'ECPoint'{point = PubKey},
+            public_key:verify(
+              AuthData, none, InnerSig,
+              {ECPoint, {namedCurve, ?'id-Ed25519'}});
+        _ ->
+            false
+    end;
+
 do_verify(PlainText, HashAlg, Sig, Key, _) ->
     public_key:verify(PlainText, HashAlg, Sig, Key).
+
+
+%%%----------------------------------------------------------------
+%%% Construct the FIDO authenticator data blob (69 bytes with SHA-256):
+%%%   SHA-256(application) || flags:8 || counter:32 || SHA-256(M)
+%%% Used by both ECDSA-SK and Ed25519-SK verification.
+%%%----------------------------------------------------------------
+fido_authenticator_data(Application, Flags, Counter, Message) ->
+    AppHash = crypto:hash(sha256, Application),
+    MsgHash = crypto:hash(sha256, Message),
+    <<AppHash/binary,
+      Flags:8,
+      Counter:32/unsigned-big-integer,
+      MsgHash/binary>>.
 
 
 %%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%
@@ -2273,6 +2367,13 @@ valid_key_sha_alg(public, {#'ECPoint'{},{namedCurve,OID}}, Alg) ->
     valid_key_sha_alg_ec(OID, Alg);
 valid_key_sha_alg(private, #'ECPrivateKey'{parameters = {namedCurve,OID}}, Alg) ->
     valid_key_sha_alg_ec(OID, Alg);
+
+%% SK key types — public only (no private clauses needed; the private
+%% key lives on the FIDO hardware token and is never seen by OTP).
+valid_key_sha_alg(public, {ecdsa_sk, #'ECPoint'{}, secp256r1, _},
+                  'sk-ecdsa-sha2-nistp256@openssh.com') -> true;
+valid_key_sha_alg(public, {ed25519_sk, _, _},
+                  'sk-ssh-ed25519@openssh.com')         -> true;
 valid_key_sha_alg(_, _, _) -> false.
 
 
@@ -2283,8 +2384,11 @@ valid_key_sha_alg_ec(_, _) -> false.
 
     
 
--dialyzer({no_match, public_algo/1}).
-
+-spec public_algo(ssh_public_key()) -> pubkey_alg().
+public_algo({ecdsa_sk, #'ECPoint'{}, secp256r1, _App}) ->
+    'sk-ecdsa-sha2-nistp256@openssh.com';
+public_algo({ed25519_sk, _Key, _App}) ->
+    'sk-ssh-ed25519@openssh.com';
 public_algo(#'RSAPublicKey'{}) ->   'ssh-rsa';  % FIXME: Not right with draft-curdle-rsa-sha2
 public_algo({_, #'Dss-Parms'{}}) -> 'ssh-dss';
 public_algo({#'ECPoint'{},{namedCurve,OID}}) when is_tuple(OID) -> 
@@ -2292,6 +2396,8 @@ public_algo({#'ECPoint'{},{namedCurve,OID}}) when is_tuple(OID) ->
     binary_to_atom(SshCurveType).
 
 
+sha('sk-ecdsa-sha2-nistp256@openssh.com') -> sha256;
+sha('sk-ssh-ed25519@openssh.com')         -> undefined; % Ed25519 has internal hashing (SHA-512)
 sha('ssh-rsa') -> sha;
 sha('rsa-sha2-256') -> sha256;
 sha('rsa-sha2-384') -> sha384;

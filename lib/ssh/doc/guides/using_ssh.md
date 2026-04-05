@@ -430,6 +430,98 @@ and `ClientAddress`). See the
 > It still works, but lacks for example I/O possibility. It is because of that
 > compatibility we need the `{direct,...}` construction.
 
+## FIDO Security Key Authentication
+
+The Erlang SSH daemon can authenticate clients that use FIDO/U2F security keys
+(also known as `-sk` keys in OpenSSH). This works with both `ecdsa-sk` and
+`ed25519-sk` key types.
+
+No special daemon configuration is required — FIDO key types are included in
+the default algorithm set. The daemon verifies the FIDO signature
+automatically as part of standard public key authentication.
+
+_Step 1._ On the client machine, generate a FIDO key (requires a hardware
+security key or `sk-dummy.so` for testing):
+
+```text
+$bash> ssh-keygen -t ecdsa-sk
+```
+
+_Step 2._ Add the public key to the daemon's `authorized_keys` file, as you
+would with any other key type.
+
+_Step 3._ Start the Erlang daemon normally:
+
+```erlang
+1> ssh:start().
+ok
+2> {ok, Sshd} = ssh:daemon(8989, [{system_dir, "/tmp/ssh_daemon"},
+                                  {user_dir, "/tmp/otptest_user/.ssh"}]).
+{ok,<0.54.0>}
+```
+
+_Step 4._ Connect from an OpenSSH client. The security key will blink,
+requesting a touch:
+
+```text
+$bash> ssh -p 8989 -i ~/.ssh/id_ecdsa_sk localhost
+Confirm user presence for key ECDSA-SK ...
+[touch the security key]
+Eshell V15.0  (abort with ^G)
+1>
+```
+
+### FIDO Counter Enforcement
+
+User presence (UP — the authenticator touch flag) is **enforced by default**
+for all FIDO security key authentications.  Every SK signature must have the
+UP bit set, meaning the user must physically touch the authenticator.
+
+The **only** way to relax this requirement is to prefix a key with
+`no-touch-required` in the server's `authorized_keys` file.  This is a
+per-key setting, consistent with OpenSSH's behaviour, and is intended for
+headless or automated service keys that cannot involve a physical touch:
+
+```text
+sk-ssh-ed25519@openssh.com AAAA... human-key
+no-touch-required sk-ssh-ed25519@openssh.com AAAA... headless-service-key
+```
+
+Keys without the `no-touch-required` prefix continue to require a physical
+touch on every authentication.
+
+An optional `sk_fido_counter_fun` daemon callback can be configured to
+enforce **signature counter monotonicity** — that is, to detect cloned
+security keys by rejecting signatures where the counter has not increased
+since the last successful authentication.  The callback is purely for
+counter tracking and **cannot override UP enforcement**; user presence
+policy is determined solely by the `authorized_keys` entry for each key.
+
+```erlang
+{ok, Sshd} = ssh:daemon(8989,
+                         [{system_dir, "/tmp/ssh_daemon"},
+                          {user_dir, "/tmp/otptest_user/.ssh"},
+                          {sk_fido_counter_fun,
+                           fun(#{counter := Counter, key := Key, user := User}) ->
+                               case my_counter_db:check_and_update(User, Key, Counter) of
+                                   ok -> ok;
+                                   {error, _} = Err -> Err
+                               end
+                           end}]).
+```
+
+The callback receives a map with the following keys:
+
+- `counter` — the 32-bit signature counter from the authenticator
+- `key` — the public key used for authentication
+- `user` — the username being authenticated (string)
+- `algorithm` — the public key algorithm atom
+
+The callback must return `ok` to allow authentication, or `{error, Reason}`
+to reject it.
+
+See the [SSH Application](ssh_app.md) reference for details.
+
 ## SFTP Server
 
 Start the Erlang `ssh` daemon with the SFTP subsystem:

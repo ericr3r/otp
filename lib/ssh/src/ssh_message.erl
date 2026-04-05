@@ -646,6 +646,16 @@ decode(<<?BYTE(?SSH_MSG_DEBUG), ?BYTE(_), ?DEC_BIN(_, MLen), ?DEC_BIN(_, LLen)>>
 %%%
 
 %%%-------- public key --------
+%% FIDO/U2F security key public key encoding (OpenSSH PROTOCOL.u2f).
+%% ECDSA-SK wire format: key-type(34) || curve("nistp256") || ec_point || application
+%% Ed25519-SK wire format: key-type(26) || public-key(32) || application
+ssh2_pubkey_encode({ecdsa_sk, #'ECPoint'{point = Q}, secp256r1, Application}) ->
+    <<?STRING(<<"sk-ecdsa-sha2-nistp256@openssh.com">>),
+      ?STRING(<<"nistp256">>),
+      ?Estring(Q),
+      ?Estring(Application)>>;
+ssh2_pubkey_encode({ed25519_sk, PubKey, Application}) ->
+    <<?STRING(<<"sk-ssh-ed25519@openssh.com">>), ?Estring(PubKey), ?Estring(Application)>>;
 ssh2_pubkey_encode(#'RSAPublicKey'{modulus = N, publicExponent = E}) ->
     <<?STRING(<<"ssh-rsa">>), ?Empint(E), ?Empint(N)>>;
 
@@ -695,6 +705,22 @@ ssh2_pubkey_decode2(<<?UINT32(7), "ssh-dss",
                       g = G}
      }, Rest};
 
+%% FIDO/U2F security key public key decoding (OpenSSH PROTOCOL.u2f).
+%% String length 34 = byte_size("sk-ecdsa-sha2-nistp256@openssh.com")
+%% String length 26 = byte_size("sk-ssh-ed25519@openssh.com")
+ssh2_pubkey_decode2(<<?UINT32(34),
+                      "sk-ecdsa-sha2-nistp256@openssh.com",
+                      ?DEC_BIN(_Curve, _CL),
+                      ?DEC_BIN(Q, _QL),
+                      ?DEC_BIN(Application, _AL),
+                      Rest/binary>>) ->
+    {{ecdsa_sk, #'ECPoint'{point = Q}, secp256r1, Application}, Rest};
+ssh2_pubkey_decode2(<<?UINT32(26),
+                      "sk-ssh-ed25519@openssh.com",
+                      ?DEC_BIN(PubKey, _PL),
+                      ?DEC_BIN(Application, _AL),
+                      Rest/binary>>) ->
+    {{ed25519_sk, PubKey, Application}, Rest};
 ssh2_pubkey_decode2(<<?DEC_BIN(SshCurveName,SCNL), Rest0/binary>>) ->
     {Pub, Rest} =
         case {SshCurveName, Rest0} of
