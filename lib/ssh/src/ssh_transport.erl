@@ -2370,8 +2370,7 @@ valid_key_sha_alg_ec(_, _) -> false.
 
     
 
--dialyzer({no_match, public_algo/1}).
-
+-spec public_algo(ssh_public_key()) -> pubkey_alg().
 public_algo({ecdsa_sk, #'ECPoint'{}, secp256r1, _App}) ->
     'sk-ecdsa-sha2-nistp256@openssh.com';
 public_algo({ed25519_sk, _Key, _App}) ->

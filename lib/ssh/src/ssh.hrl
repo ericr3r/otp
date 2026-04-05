@@ -187,6 +187,8 @@
 -define(do_del_opt(C,K,O),  ssh_options:delete_key(C,K,O, ?MODULE,?LINE)).
 -define(DELETE_INTERNAL_OPT(Key,Opts),  ?do_del_opt(internal_options,Key,Opts) ).
 
+%% Include public_key.hrl for record definitions used in SK key types
+-include_lib("public_key/include/public_key.hrl").
 
 %% Types
 -type role()                  :: client | server .
@@ -259,6 +261,7 @@ to run any subsystems.
         'ssh-ed448' |
         'rsa-sha2-256' |
         'rsa-sha2-512' |
+        sk_pubkey_alg() |
         legacy_pubkey_alg().
 
 -doc(#{group => <<"Legacy Algorithms">>}).
@@ -266,6 +269,27 @@ to run any subsystems.
         'ssh-rsa' |
         %% Gone in OpenSSH 7.3.p1:
         'ssh-dss'.
+
+-doc(#{group => <<"Common Options">>}).
+-doc "FIDO/U2F Security Key public key algorithms (OpenSSH PROTOCOL.u2f).".
+-type sk_pubkey_alg() ::
+'sk-ecdsa-sha2-nistp256@openssh.com' |
+'sk-ssh-ed25519@openssh.com'.
+
+%%% SK (FIDO/U2F Security Key) public key types.
+%%% These are SSH-specific and not part of public_key:public_key().
+%%% See OpenSSH PROTOCOL.u2f for the wire format specification.
+
+-doc "ECDSA-SK public key for FIDO/U2F security keys (secp256r1 curve).".
+-type ecdsa_sk_public_key() :: {ecdsa_sk, #'ECPoint'{}, secp256r1, Application :: binary()}.
+
+-doc "Ed25519-SK public key for FIDO/U2F security keys.".
+-type ed25519_sk_public_key() :: {ed25519_sk, PubKey :: binary(), Application :: binary()}.
+
+-doc "SSH-specific public key type including FIDO/U2F SK keys.".
+-type ssh_public_key() :: public_key:public_key() |
+            ecdsa_sk_public_key() |
+            ed25519_sk_public_key().
 
 -doc(#{group => <<"Common Options">>}).
 -type cipher_alg()  ::
@@ -1037,7 +1061,7 @@ behaviour — `sshd` also does not enforce counter monotonicity.
 
 -doc(#{group => <<"Daemon Options">>}).
 -type sk_fido_counter_info() :: #{counter := non_neg_integer(),
-                                  key := public_key:public_key(),
+                                  key := ssh_public_key(),
                                   user := string(),
                                   algorithm := atom()}.
 

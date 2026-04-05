@@ -195,6 +195,8 @@ The directory could be changed with the option
               alg_entry/0,
               kex_alg/0,
               pubkey_alg/0,
+              sk_pubkey_alg/0, ssh_public_key/0,
+              ecdsa_sk_public_key/0, ed25519_sk_public_key/0, 
               cipher_alg/0,
               mac_alg/0,
               compression_alg/0,
