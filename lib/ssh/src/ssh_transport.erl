@@ -1779,7 +1779,7 @@ do_verify(PlainText, sha256,
                                'ECDSA-Sig-Value', Sval),
                     public_key:verify(
                       AuthData, sha256, DerEncodedSig,
-                      {Q, {namedCurve, secp256r1}});
+                      {Q, {namedCurve, ?secp256r1}});
                 _ ->
                     false
             end;
@@ -1804,7 +1804,7 @@ do_verify(PlainText, undefined,
             %% Ed25519 key as {#'ECPoint'{}, {namedCurve, id-Ed25519}}
             ECPoint = #'ECPoint'{point = PubKey},
             public_key:verify(
-              AuthData, undefined, InnerSig,
+              AuthData, none, InnerSig,
               {ECPoint, {namedCurve, ?'id-Ed25519'}});
         _ ->
             false
